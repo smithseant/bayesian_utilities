@@ -9,12 +9,12 @@ This module provides several useful utilities:
  - Perform regional sampling by correcting a normal sample (at a local mode) with
    both importance and rejection sampling.
  - Calculate a percentile from scatter data with weights.
- - Creating scatterplot matrixes and simliar array of plots for contours
+ - Creating scatterplot matrixes and similar array of plots for contours
    of pairwise marginals when provided a gridded distribution.
 Created in June-Oct. 2019, author: Sean T. Smith
 """
 
-from numpy import (array, empty, zeros, ones, ones_like, linspace, moveaxis, take_along_axis, meshgrid,
+from numpy import (array, empty, zeros, ones, linspace, moveaxis, take_along_axis, meshgrid,
                    histogram2d, interp, searchsorted, prod, sqrt, exp, log)
 from numpy.linalg import eigh
 from numpy.random import default_rng
@@ -30,13 +30,14 @@ std_norm = my_rng.standard_normal
 
 def covariance(func, x0, *args, decomp=True, **kwargs):
     """
-    Use central differencing to approximate the curvature of -ln(PDF)
-    (supplied func) at a mode (supplied x0) and use the curvature as the
-    covariance for the multivariate normal approximation of the PDF.
+    Use central differencing to approximate the inverse curvature of -ln(PDF), input func, at
+    the indicated point, x0, (this inverse curvature at a mode is most often used as the
+    covariance for a multivariate-normal approximation of the PDF).
+    Requiring 2 * n**2 + 1 function evaluations (where n is the No. of dimensions).
     The covariance can be returned as an eigen decomposition or a matrix.
     """
-    n = x0.shape[0]
-    δi, δj = zeros(n), zeros(n)
+    n = x0.shape[0]  # No. of dimensions
+    δi, δj = zeros(n), zeros(n)  # offsets in x for individual function evaluations.
     Σinv = empty((n, n))
     fmid = func(x0, *args, **kwargs)
     for i in range(n):
@@ -50,7 +51,7 @@ def covariance(func, x0, *args, decomp=True, **kwargs):
             fpm = func(x0 + δi - δj, *args, **kwargs)
             fmp = func(x0 - δi + δj, *args, **kwargs)
             fmm = func(x0 - δi - δj, *args, **kwargs)
-            Σinv[i, j] = Σinv[j, i] = (fpp-fpm-fmp+fmm) / (4 * δi[i] * δj[j])
+            Σinv[i, j] = Σinv[j, i] = (fpp - fpm - fmp + fmm) / (4 * δi[i] * δj[j])
             δj[j] = 0
         δi[i] = 0
     Λinv, V  = eigh(Σinv)
@@ -333,7 +334,7 @@ def inverse_transform(pdf, x_grid, U=None, ns=100, fast=False):
         # TODO: Optionally parallelize this loop.
         for i in range(ns):
             # Condition on sample:
-            ind = searchsorted(x_grid[0], X[i, 0])
+            ind = min(searchsorted(x_grid[0], X[i, 0]), x_grid[0].shape[0] - 1)
             α = ((X[i, 0]        - x_grid[0][ind-1]) /
                  (x_grid[0][ind] - x_grid[0][ind-1]))  # incorrect when ind==0
             if fast or ind == 0:
@@ -433,24 +434,24 @@ def percentile(percent, values, weights=None, axis=0, presorted=False):
     return res.reshape(res_shape)
 
 def scatterplot_matrix(x, labels, weights=None, plot_type='scatter', ax_label_font=14,
-                       fig_options={}, marginal_options={}, joint_options={}):
+                       fig_options={}, marginal_options={}, joint_options={}, grid=True):
     """Create a scatterplot matrix from an array of samples, x."""
     ndim, nsamples = x.shape
     if type(fig_options) is tuple:
         fig, axes = fig_options
     else:
         fig, axes = plt.subplots(ndim, ndim, sharex='col', sharey='row',
-                    gridspec_kw=dict(wspace=0, hspace=0), **fig_options)
+                                 gridspec_kw=dict(wspace=0, hspace=0), **fig_options)
         # Row & column formatting
         for i in range(ndim):
             axes[i][0].set_ylabel(labels[i], fontsize=ax_label_font)
-            axes[i][0].set_ylim([percentile( 0.1, x[i], weights),
-                                 percentile(99.9, x[i], weights)])
+            axes[i][0].set_ylim([percentile( 0.01, x[i], weights),
+                                 percentile(99.99, x[i], weights)])
         fig.align_ylabels()
         for j in range(ndim):
             axes[-1][j].set_xlabel(labels[j], fontsize=ax_label_font)
-            axes[-1][j].set_xlim([percentile( 0.1, x[j], weights),
-                                  percentile(99.9, x[j], weights)])
+            axes[-1][j].set_xlim([percentile( 0.01, x[j], weights),
+                                  percentile(99.99, x[j], weights)])
         # Remove unwanted frames & ticks from the upper triangle
         for i in range(ndim-1):
             for j in range(i+1, ndim):
@@ -468,13 +469,17 @@ def scatterplot_matrix(x, labels, weights=None, plot_type='scatter', ax_label_fo
             axes[i][i] = (ax, twin)
 
     # Marginals
-    nbins = max(min(nsamples // 100, 100), 20)  # This just a heuristic — adjust freely.
+    nbins = max(min(nsamples // 300, 100), 20)  # This just a heuristic — adjust freely.
     for i in range(ndim):
-        ax = axes[i][i][1]
-        xlim = ax.get_xlim()
+        ax_left, ax_right = axes[i][i]
+        xlim = ax_right.get_xlim()
         bins = linspace(xlim[0], xlim[1], nbins)
-        ax.hist(x[i], weights=weights, bins=bins, density=True, **marginal_options)
-        ax.set_ylim([0, None])
+        ax_right.hist(x[i], weights=weights, bins=bins, density=True, **marginal_options)
+        ax_right.set_ylim([0, None])
+        if grid:
+            ax_left.set_axisbelow(True)
+            ax_left.xaxis.grid(True, alpha=0.2)
+            ax_right.yaxis.grid(True, alpha=0.2)
 
     # Pairwise plots:
     nbins = max(min(int(sqrt(nsamples / 40)), 75), 15)  # This just a heuristic — adjust freely.
@@ -507,18 +512,20 @@ def scatterplot_matrix(x, labels, weights=None, plot_type='scatter', ax_label_fo
                 xh, yh = (xe[:-1] + xe[1:]) / 2, (ye[:-1] + ye[1:]) / 2
                 Xh, Yh = meshgrid(xh, yh, indexing='xy')
                 ax.contour(Xh, Yh, H.T, **joint_options)
+            if grid:
+                ax.grid(True, alpha=0.2)
     return fig, axes
 
 
 def contour_matrix(pdf, x_grids, labels, plot_type='contour', ax_label_font=14,
-                   fig_options={}, marginal_options={}, joint_options={}):
+                   fig_options={}, marginal_options={}, joint_options={}, grid=True):
     """Create a contour-plot matrix from a multidimensional array of PDF values."""
     ndim = len(labels)
     if type(fig_options) is tuple:
         fig, axes = fig_options
     else:
         fig, axes = plt.subplots(ndim, ndim, sharex='col', sharey='row',
-                    gridspec_kw=dict(wspace=0, hspace=0), **fig_options)
+                                 gridspec_kw=dict(wspace=0, hspace=0), **fig_options)
         # Row & column formatting
         for i in range(ndim):
             axes[i][0].set_ylabel(labels[i], fontsize=ax_label_font)
@@ -556,9 +563,13 @@ def contour_matrix(pdf, x_grids, labels, plot_type='contour', ax_label_font=14,
             Δxk = (x_grids[k][1:] - x_grids[k][:-1]).reshape(shape)
             marginal = 0.5 * (Δxk * marginal[:, :-1] +
                               Δxk * marginal[:, +1:]).sum(axis=1)
-        ax = axes[i][i][1]
-        ax.plot(x_grids[i], marginal, **marginal_options)
-        ax.set_ylim([0, None])
+        ax_left, ax_right = axes[i][i]
+        ax_right.plot(x_grids[i], marginal, **marginal_options)
+        ax_right.set_ylim([0, None])
+        if grid:
+            ax_left.set_axisbelow(True)
+            ax_left.xaxis.grid(True, alpha=0.2)
+            ax_right.yaxis.grid(True, alpha=0.2)
 
     # Pairwise plots:
     for i in range(ndim):
@@ -585,6 +596,8 @@ def contour_matrix(pdf, x_grids, labels, plot_type='contour', ax_label_font=14,
                 ax.contour(X1, X2, joint.T, **joint_options)
             elif plot_type == 'pcolor':
                 ax.pcolor(X1, X2, joint.T, shading='auto', **joint_options)
+            if grid:
+                ax.grid(True, alpha=0.2)
     return fig, axes
 
 

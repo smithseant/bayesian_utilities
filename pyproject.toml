@@ -1,0 +1,15 @@
+[project]
+name = "bayesian-utilities"
+version = "0.1.0"
+description = "A few helper functions for simple Bayesian analysis in python"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "numba",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.5"]
+build-backend = "uv_build"
