@@ -1,3 +1,7 @@
+# Operating-system files
+.DS_Store
+Thumbs.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -103,12 +107,17 @@ celerybeat.pid
 
 # Environments
 .env
+.env.local
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# general IDEs
+.vscode/
+.idea/
 
 # Spyder project settings
 .spyderproject
