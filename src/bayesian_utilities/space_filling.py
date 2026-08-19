@@ -1,9 +1,10 @@
 """
-Sean's note: This is an iteration on (and a simplification of) utilities in
-             `~/Documents-Utah/Python/design_of_experiments` — namely `doe_utilities.py` &
-             `DOE_spacefilling.py`.  Notably, those versions allowed pre-existing (fixed) points.
-             That feature can be re-added if we find value in the active-learning techniques.
+This is a simple toolkit to perform design-of-experiment sampling according to my preferred
+methods - Latin hyper-cube sampling, Sobol sampling & greedy maximin subsampling.
+
+Created April 2017 @author: Sean T. Smith, updated July-Aug 2026.
 """
+
 from math import ceil, log2
 from numpy import (array, full, linspace, arange, concatenate, tril_indices, unravel_index,
                    bincount, isfinite, outer, sqrt, exp, inf)
@@ -12,25 +13,39 @@ from numpy.random import default_rng
 from scipy.spatial.distance import cdist
 from scipy.stats import qmc
 
+
 # Generative space-filling designs on a unit box:
 
-def lhs_design(n_pnts, n_dims, position="center", rng=None):
+def lhs_design(n_pnts, n_dims, fixed=None, position="center", rng=None):
     """
     Sample a latin hypercube design (a space-filling design which ensures a coordinate-aligned
-    stratified uniformity) over the unit box w/ `n_pnts` number of points & `n_dims` number of
-    dimensions.  The position of each point within it sub-region can be specified as
-    'center' (default), 'edges', or 'random'.  Developed by Mike Mckay at Los Alamos in 1979.
+    uniform stratification developed by Mike Mckay at Los Alamos in 1979) over the unit box w/
+    `n_pnts` number of points & `n_dims` number of dimensions.  If fixed points are provided,
+    their occupied strata are excluded so that the new points complete a `len(fixed) + n_pnts`
+    latin hypercube (or augment an approximate one).  Points within each stratum can be placed
+    at: the 'center', the 'edges', or at a 'random' location within each stratum.
     """
     rng = default_rng() if rng is None else rng
-    rand = rng.random
-    permute = rng.permutation
-    δx = 1 / n_pnts
-    endp = (position == "edges")
-    design = array([permute(linspace(0, 1, n_pnts, endpoint=endp)) for dim in range(n_dims)]).T
+    n_fixed = 0 if fixed is None else len(fixed)
+    n_tot = n_pnts + n_fixed
+    δx = 1 / (n_pnts + n_fixed)
+    include_endpoint = (position == "edges")
+    all_strata = []
+    for dim in range(n_dims):
+        available_strata = list(linspace(0, 1, n_tot, endpoint=include_endpoint))
+        if fixed is not None:
+            offset = 0 if include_endpoint else δx / 2
+            for coordinate in fixed[:, dim]:
+                occupied_position = coordinate - offset
+                i_occupied = min(range(len(available_strata)),
+                                 key=lambda i: abs(available_strata[i] - occupied_position))
+                available_strata.pop(i_occupied)
+        all_strata.append(rng.permutation(available_strata))
+    design = array(all_strata).T
     if position == "center":
         design += δx / 2
     elif position == "random":
-        design += δx * rand((n_pnts, n_dims))
+        design += δx * rng.random((n_pnts, n_dims))
     return design
 
 
