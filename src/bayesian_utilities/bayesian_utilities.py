@@ -16,6 +16,7 @@ from numpy import (array, empty, zeros, linspace, s_, expand_dims, meshgrid, his
 from numpy.linalg import eigh
 from numpy.random import default_rng
 from scipy.special import erf, erfinv
+from scipy.stats import quantile
 from numba import jit
 from numba.extending import is_jitted
 
@@ -408,13 +409,11 @@ def scatterplot_matrix(x, labels=None, weights=None, plot_type='scatter', ax_lab
         # Row & column formatting
         for i in range(n_dims):
             axes[i][0].set_ylabel(labels[i], fontsize=ax_label_font)
-            axes[i][0].set_ylim([percentile(lo, x[:, i], weights),
-                                 percentile(hi, x[:, i], weights)])
+            axes[i][0].set_ylim(quantile(x[:, i], [lo / 100, hi / 100], weights=weights))
         fig.align_ylabels()
         for j in range(n_dims):
             axes[-1][j].set_xlabel(labels[j], fontsize=ax_label_font)
-            axes[-1][j].set_xlim([percentile(lo, x[:, j], weights),
-                                  percentile(hi, x[:, j], weights)])
+            axes[-1][j].set_xlim(quantile(x[:, j], [lo / 100, hi / 100], weights=weights))
         # Remove unwanted frames & ticks from the upper triangle
         for i in range(n_dims-1):
             for j in range(i+1, n_dims):
