@@ -7,7 +7,7 @@ Created April 2017 @author: Sean T. Smith, updated July-Aug 2026.
 
 from math import ceil, log2
 from numpy import (array, full, linspace, arange, concatenate, tril_indices, unravel_index,
-                   bincount, isfinite, outer, sqrt, exp, inf)
+                   bincount, isfinite, outer, sqrt, exp, log, inf)
 from numpy.linalg import svd
 from numpy.random import default_rng
 from scipy.spatial.distance import cdist
@@ -62,35 +62,6 @@ def oa_lhs_design(n_pnts, n_dims, rng=None):
     return sp_lhs.random(n=n_pnts)
 
 
-def maximin_of_designs(n_pnts, n_dims, n_samples, sampler=lhs_design, **kwargs):
-    """
-    Optimize a space-filling property of designs by sampling `n_samples` number of designs from
-    `sampler(n_pnts, n_dims, **kwargs)` over the unit box with `n_pnts` number of points and
-    `n_dims` number of dimensions — and select the one that maximizes the minimum distance within
-    the design (search for designs w/ larger closest-pair spacing).
-    """
-    def min_dist_count(design):
-        """
-        For a specified `design`, calculate the minimum inter-point distance & the number of times
-        that distance is repeated.
-        """
-        dist_array = cdist(design, design)
-        dist_vals = dist_array[*tril_indices(design.shape[0], -1)]
-        min_dist = dist_vals.min()
-        min_count = (dist_vals == min_dist).sum()
-        return min_dist, min_count
-
-    design = None
-    maximin_dist = -inf
-    maximin_count = 0
-    for i in range(n_samples):
-        proposed = sampler(n_pnts, n_dims, **kwargs)
-        min_dist, min_count = min_dist_count(proposed)
-        if min_dist > maximin_dist  or  min_dist == maximin_dist and min_count < maximin_count:
-            design, maximin_dist, maximin_count = proposed, min_dist, maximin_count
-    return design
-
-
 def sobol_design(n_pnts, n_dims, rng=None, **kwargs):
     """
     Sample a Sobol-sequence design (a space-filling design which aims for low discrepancy) over
@@ -100,6 +71,75 @@ def sobol_design(n_pnts, n_dims, rng=None, **kwargs):
     """
     sp_sobol = qmc.Sobol(d=n_dims, rng=rng, **kwargs)
     return sp_sobol.random_base2(ceil(log2(n_pnts)))
+
+
+def optimal_of_designs(n_pnts, n_dims, n_samples, sampler=lhs_design, optimality="maximin", 
+                       test_pnts=None, pnts2bases=None, **kwargs):
+    """
+    Optimize a space-filling property of designs by sampling `n_samples` number of designs from
+    `sampler(n_pnts, n_dims, **kwargs)` over the unit box with `n_pnts` number of points and
+    `n_dims` number of dimensions — and select the one with the best `optimality` property:
+    
+        "maximin" - maximize smallest neighbor distance (for larger closest-pair spacing),
+        "D"       - maximize differential posterior Shannon info. — max(det(XᵀX))
+        "A"       - minimize avg. posterior variance of the linear-parameters — min(trace((XᵀX)⁻¹)),
+        "I"       - minimize the average prediction uncertainty across `test_pnts`,
+        "G"       - minimize the largest prediction uncertainty among `test_pnts`.
+    """
+
+    def maximin_opt(design):
+        """
+        For a specified `design`, optimize by minimum inter-point distance with preference for
+        fewer repeats of the same distance.
+        """
+        dist_array = cdist(design, design)
+        dist_vals = dist_array[*tril_indices(design.shape[0], -1)]
+        min_dist = dist_vals.min()
+        min_count = (dist_vals == min_dist).sum()
+        return min_dist, -min_count
+
+    def d_opt(design):
+        """Differential posterior Shannon info. -> determinant of the information (maximized)."""
+        X = pnts2bases(design)
+        U, s, VT = svd(X, full_matrices=False)
+        return 2 * log(s).sum()
+
+    def a_opt(design):
+        """Avg. posterior variance of regression coefficients -> trace of inv. inf. (minimized)."""
+        X = pnts2bases(design)
+        U, s, VT = svd(X, full_matrices=False)
+        return -(1 / s**2).sum()
+
+    def i_opt(design):
+        """Average uncertainty of posterior prediction (minimized)."""
+        X = pnts2bases(design)
+        U, s, VT = svd(X, full_matrices=False)
+        H = pnts2bases(test_pnts) if test_pnts is not None else X
+        HpinvXT = (H @ VT.T) / s
+        return -((HpinvXT * HpinvXT).sum(axis=1)).mean()
+
+    def g_opt(design):
+        """Largest uncertainty of posterior prediction (minimized)."""
+        X = pnts2bases(design)
+        U, s, VT = svd(X, full_matrices=False)
+        H = pnts2bases(test_pnts) if test_pnts is not None else X
+        HpinvXT = (H @ VT.T) / s
+        return -((HpinvXT * HpinvXT).sum(axis=1)).max()
+
+
+    criteria = dict(maximin=maximin_opt, D=d_opt, A=a_opt, I=i_opt, G=g_opt)
+    if optimality in ("D", "A", "I", "G") and pnts2bases is None:
+        raise ValueError(f"optimality {optimality} requires a `pnts2bases` function")
+    calc_criterion = criteria[optimality]
+
+    opt_design = None
+    opt_criterion = None
+    for i in range(n_samples):
+        prop_design = sampler(n_pnts, n_dims, **kwargs)
+        prop_criterion = calc_criterion(prop_design)
+        if opt_criterion is None or prop_criterion > opt_criterion:
+            opt_design, opt_criterion = prop_design, prop_criterion
+    return opt_design
 
 
 # Sub-sampling designs for arbitrary densities:
