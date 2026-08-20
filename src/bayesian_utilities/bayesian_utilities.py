@@ -11,12 +11,12 @@ This module provides several useful utilities:
 Created in June-Oct. 2019, author: Sean T. Smith
 """
 
-from numpy import (array, empty, zeros, ones, linspace, s_, moveaxis, take_along_axis, expand_dims,
-                   meshgrid, histogram2d, interp, searchsorted, prod, sqrt, exp, log)
+from numpy import (array, empty, zeros, linspace, s_, expand_dims, meshgrid, histogram2d,
+                   interp, searchsorted, sqrt, exp, log)
 from numpy.linalg import eigh
 from numpy.random import default_rng
 from scipy.special import erf, erfinv
-from numba import jit, prange
+from numba import jit
 from numba.extending import is_jitted
 
 import matplotlib.pyplot as plt
