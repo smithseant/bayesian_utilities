@@ -11,12 +11,11 @@ This module provides several useful utilities:
 Created in June-Oct. 2019, author: Sean T. Smith
 """
 
-from numpy import (array, empty, zeros, linspace, s_, expand_dims, meshgrid, histogram2d,
-                   interp, searchsorted, sqrt, exp, log)
+from numpy import (array, empty, zeros, ones, linspace, s_, moveaxis, take_along_axis, expand_dims,
+                   meshgrid, histogram2d, interp, searchsorted, prod, sqrt, exp, log)
 from numpy.linalg import eigh
 from numpy.random import default_rng
 from scipy.special import erf, erfinv
-from scipy.stats import quantile
 
 import matplotlib.pyplot as plt
 
@@ -167,6 +166,39 @@ def inverse_transform(pdf, x_grid, U=None, ns=100, fast=False):
     return X
 
 
+def percentile(percent, values, weights=None, axis=0, presorted=False):
+    """
+    Calculate the percentile boundary(s) from a set of data samples.
+    This implementation is close to numpy.percentile, but supports weights.
+    parameters
+        percent:   float percent amount - between 0 and 100 inclusive,
+        values:    array of data samples,
+        weights:   1D array of weights, same length as values along the specified axis,
+        axis:      integer axis of values that is traversed for computation,
+        presorted: bool, if True then avoid the sorting of the initial array.
+    returns
+        res:  array of computed percentile boundary(s).
+    Heavily modified from user Alleo's answer on the stackoverflow post:
+    https://stackoverflow.com/questions/21844024/weighted-percentile-using-numpy
+    """
+    if weights is None:
+        weights = ones(values.shape[axis])
+    if not presorted:
+        sorter = values.argsort(axis=axis)
+        values = take_along_axis(values, sorter, axis=axis)
+        weights = weights[sorter]
+    data_quant = 100 * (weights.cumsum(axis=axis) - 0.5 * weights)
+    data_quant /= weights.sum(axis=axis, keepdims=True)
+    res_shape = [n for i, n in enumerate(values.shape) if i != axis]
+    n = int(prod(res_shape))
+    data_quant = moveaxis(data_quant, axis, -1).reshape((n, -1))
+    values = moveaxis(values, axis, -1).reshape((n, -1))
+    res = empty(n)
+    for i in range(n):
+        res[i] = interp(percent, data_quant[i], values[i])
+    return res.reshape(res_shape)
+
+
 def scatterplot_matrix(x, labels=None, weights=None, plot_type='scatter', ax_label_font=14,
                        fig_options=None, marginal_options=None, joint_options=None, grid=True,
                        clip_percentiles=(0.01, 99.99)):
@@ -221,11 +253,15 @@ def scatterplot_matrix(x, labels=None, weights=None, plot_type='scatter', ax_lab
         # Row & column formatting
         for i in range(n_dims):
             axes[i][0].set_ylabel(labels[i], fontsize=ax_label_font)
-            axes[i][0].set_ylim(quantile(x[:, i], [lo / 100, hi / 100], weights=weights))
+            axes[i][0].set_ylim([percentile(lo, x[:, i], weights),
+                                 percentile(hi, x[:, i], weights)])
+            # axes[i][0].set_ylim(quantile(x[:, i], [lo / 100, hi / 100], weights=weights))  # requires scipy>=1.17.0
         fig.align_ylabels()
         for j in range(n_dims):
             axes[-1][j].set_xlabel(labels[j], fontsize=ax_label_font)
-            axes[-1][j].set_xlim(quantile(x[:, j], [lo / 100, hi / 100], weights=weights))
+            axes[-1][j].set_xlim([percentile(lo, x[:, j], weights),
+                                  percentile(hi, x[:, j], weights)])
+            # axes[-1][j].set_xlim(quantile(x[:, j], [lo / 100, hi / 100], weights=weights))  # requires scipy>=1.17.0
         # Remove unwanted frames & ticks from the upper triangle
         for i in range(n_dims-1):
             for j in range(i+1, n_dims):
