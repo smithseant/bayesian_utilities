@@ -16,7 +16,6 @@ from numpy import (array, empty, zeros, ones, linspace, s_, moveaxis, take_along
 from numpy.linalg import eigh
 from numpy.random import default_rng
 from scipy.special import erf, erfinv
-
 import matplotlib.pyplot as plt
 
 my_rng = default_rng()
@@ -445,7 +444,6 @@ def contour_matrix(pdf, x_grids, labels=None, plot_type='contour', ax_label_font
 if __name__ == "__main__":
     from numpy import array, empty, arange, histogram2d, exp, log, pi as π
     from scipy.optimize import minimize
-    import matplotlib.pyplot as plt
 
     # Define the target pdf (must be in the form of its negative log):
     def my_nln_pdf(y, μ1=0.5, σ1=0.5, c1=2.0, μ2=0.0, σ2=1.0, c2=6.0):

@@ -11,24 +11,19 @@ name = "bayesian-utilities"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "matplotlib" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
-[package.optional-dependencies]
-plots = [
-    { name = "matplotlib" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "matplotlib", marker = "extra == 'plots'", specifier = ">=3.7.3" },
+    { name = "matplotlib", specifier = ">=3.7.3" },
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "scipy", specifier = ">=1.12.0" },
 ]
-provides-extras = ["plots"]
 
 [[package]]
 name = "contourpy"
