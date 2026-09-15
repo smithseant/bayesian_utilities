@@ -17,8 +17,6 @@ from numpy.linalg import eigh
 from numpy.random import default_rng
 from scipy.special import erf, erfinv
 from scipy.stats import quantile
-from numba import jit
-from numba.extending import is_jitted
 
 import matplotlib.pyplot as plt
 
@@ -73,180 +71,7 @@ def normally_stretched_grid(μ, var, n, range_mult=3, clip_min=None, clip_max=No
     return stretched_grid
 
 
-@jit(nopython=True)
-def func_on_1D_mesh(func, grid0, *args):
-    """Calculate a function on a mesh and save the results to a 1 dimensional array."""
-    x = empty(1)
-    n0 = grid0.shape[0]
-    output = empty(n0)
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        output[i] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_2D_mesh(func, grid0, grid1, *args):
-    """Calculate a function on a mesh and save the results to a 2 dimensional array."""
-    x = empty(2)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    output = empty((n0, n1))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            output[i, j] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_3D_mesh(func, grid0, grid1, grid2, *args):
-    """Calculate a function on a mesh and save the results to a 3 dimensional array."""
-    x = empty(3)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    n2 = grid2.shape[0]
-    output = empty((n0, n1, n2))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            for k in range(grid2.shape[0]):
-                x[2] = grid2[k]
-                output[i, j, k] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_4D_mesh(func, grid0, grid1, grid2, grid3, *args):
-    """Calculate a function on a mesh and save the results to a 4 dimensional array."""
-    x = empty(4)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    n2 = grid2.shape[0]
-    n3 = grid3.shape[0]
-    output = empty((n0, n1, n2, n3))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            for k in range(grid2.shape[0]):
-                x[2] = grid2[k]
-                for l in range(grid3.shape[0]):
-                    x[3] = grid3[l]
-                    output[i, j, k, l] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_5D_mesh(func, grid0, grid1, grid2, grid3, grid4, *args):
-    """Calculate a function on a mesh and save the results to a 5 dimensional array."""
-    x = empty(5)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    n2 = grid2.shape[0]
-    n3 = grid3.shape[0]
-    n4 = grid4.shape[0]
-    output = empty((n0, n1, n2, n3, n4))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            for k in range(grid2.shape[0]):
-                x[2] = grid2[k]
-                for l in range(grid3.shape[0]):
-                    x[3] = grid3[l]
-                    for m in range(grid4.shape[0]):
-                        x[4] = grid4[m]
-                        output[i, j, k, l, m] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_6D_mesh(func, grid0, grid1, grid2, grid3, grid4, grid5, *args):
-    """Calculate a function on a mesh and save the results to a 6 dimensional array."""
-    x = empty(6)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    n2 = grid2.shape[0]
-    n3 = grid3.shape[0]
-    n4 = grid4.shape[0]
-    n5 = grid5.shape[0]
-    output = empty((n0, n1, n2, n3, n4, n5))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            for k in range(grid2.shape[0]):
-                x[2] = grid2[k]
-                for l in range(grid3.shape[0]):
-                    x[3] = grid3[l]
-                    for m in range(grid4.shape[0]):
-                        x[4] = grid4[m]
-                        for n in range(grid5.shape[0]):
-                            x[5] = grid5[n]
-                            output[i, j, k, l, m, n] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_7D_mesh(func, grid0, grid1, grid2, grid3, grid4, grid5, grid6, *args):
-    """Calculate a function on a mesh and save the results to a 7 dimensional array."""
-    x = empty(7)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    n2 = grid2.shape[0]
-    n3 = grid3.shape[0]
-    n4 = grid4.shape[0]
-    n5 = grid5.shape[0]
-    n6 = grid6.shape[0]
-    output = empty((n0, n1, n2, n3, n4, n5, n6))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            for k in range(grid2.shape[0]):
-                x[2] = grid2[k]
-                for l in range(grid3.shape[0]):
-                    x[3] = grid3[l]
-                    for m in range(grid4.shape[0]):
-                        x[4] = grid4[m]
-                        for n in range(grid5.shape[0]):
-                            x[5] = grid5[n]
-                            for o in range(grid6.shape[0]):
-                                x[6] = grid6[o]
-                                output[i, j, k, l, m, n, o] = func(x, *args)
-    return output
-
-@jit(nopython=True)
-def func_on_8D_mesh(func, grid0, grid1, grid2, grid3, grid4, grid5, grid6, grid7, *args):
-    """Calculate a function on a mesh and save the results to a 8 dimensional array."""
-    x = empty(8)
-    n0 = grid0.shape[0]
-    n1 = grid1.shape[0]
-    n2 = grid2.shape[0]
-    n3 = grid3.shape[0]
-    n4 = grid4.shape[0]
-    n5 = grid5.shape[0]
-    n6 = grid6.shape[0]
-    n7 = grid7.shape[0]
-    output = empty((n0, n1, n2, n3, n4, n5, n6, n7))
-    for i in range(grid0.shape[0]):
-        x[0] = grid0[i]
-        for j in range(grid1.shape[0]):
-            x[1] = grid1[j]
-            for k in range(grid2.shape[0]):
-                x[2] = grid2[k]
-                for l in range(grid3.shape[0]):
-                    x[3] = grid3[l]
-                    for m in range(grid4.shape[0]):
-                        x[4] = grid4[m]
-                        for n in range(grid5.shape[0]):
-                            x[5] = grid5[n]
-                            for o in range(grid6.shape[0]):
-                                x[6] = grid6[o]
-                                for p in range(grid7.shape[0]):
-                                    x[7] = grid7[p]
-                                    output[i, j, k, l, m, n, o, p] = func(x, *args)
-    return output
-
-# The following function generalizes the previous to nx dimensions,
-#   but I could not get it to work in numba.
+# The following function generalizes the previous to nx dimensions...
 def func_on_mesh(func, grids, *args, ind=None, x=None, loop=0, output=None, **kwargs):
     """Calculate a function on a mesh and save the results to a multidimensional array."""
     nx = len(grids)
@@ -274,20 +99,7 @@ def post_on_mesh(nln_post, grids, *args, **kwargs):
     """
     nx = len(grids)
     # Calculate the posterior on a mesh (a.k.a. a plaid grid):
-    if is_jitted(nln_post):
-        # Note: The optional key-word arguments are not passed for jitted functions.
-        if   nx == 1:  nlnP = func_on_1D_mesh(nln_post, *grids, *args)
-        elif nx == 2:  nlnP = func_on_2D_mesh(nln_post, *grids, *args)
-        elif nx == 3:  nlnP = func_on_3D_mesh(nln_post, *grids, *args)
-        elif nx == 4:  nlnP = func_on_4D_mesh(nln_post, *grids, *args)
-        elif nx == 5:  nlnP = func_on_5D_mesh(nln_post, *grids, *args)
-        elif nx == 6:  nlnP = func_on_6D_mesh(nln_post, *grids, *args)
-        elif nx == 7:  nlnP = func_on_7D_mesh(nln_post, *grids, *args)
-        elif nx == 8:  nlnP = func_on_8D_mesh(nln_post, *grids, *args)
-        else:
-            raise NotImplementedError('Capability for dimensions >= 9 has not been written!')
-    else:
-        nlnP = func_on_mesh(nln_post, grids, *args, **kwargs)
+    nlnP = func_on_mesh(nln_post, grids, *args, **kwargs)
     post = exp(nlnP.min() - nlnP)  # Using the mode as an offset avoids overflow.
 
     # Integrate over the entire array:
@@ -597,11 +409,9 @@ def contour_matrix(pdf, x_grids, labels=None, plot_type='contour', ax_label_font
 if __name__ == "__main__":
     from numpy import array, empty, arange, histogram2d, exp, log, pi as π
     from scipy.optimize import minimize
-    from numba import jit
     import matplotlib.pyplot as plt
 
     # Define the target pdf (must be in the form of its negative log):
-    @jit(nopython=True)
     def my_nln_pdf(y, μ1=0.5, σ1=0.5, c1=2.0, μ2=0.0, σ2=1.0, c2=6.0):
         x1 = log(y[0])
         x2 = y[1] - (y[0] - c1)**3 - c2
