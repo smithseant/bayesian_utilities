@@ -19,7 +19,6 @@ from scipy.special import erf, erfinv
 from scipy.stats import quantile
 from numba import jit
 from numba.extending import is_jitted
-
 import matplotlib.pyplot as plt
 
 my_rng = default_rng()
