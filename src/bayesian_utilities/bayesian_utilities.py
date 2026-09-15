@@ -195,6 +195,8 @@ def percentile(percent, values, weights=None, axis=0, presorted=False):
     res = empty(n)
     for i in range(n):
         res[i] = interp(percent, data_quant[i], values[i])
+    if len(res_shape) == 0:
+        return res[0]
     return res.reshape(res_shape)
 
 
