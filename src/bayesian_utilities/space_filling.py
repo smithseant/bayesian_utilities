@@ -2,6 +2,9 @@
 This is a simple toolkit to perform design-of-experiment sampling according to my preferred
 methods - Latin hyper-cube sampling, Sobol sampling & greedy maximin subsampling.
 
+For motivation, method-selection guidance, and detailed recommendations,
+see `docs/space_filling.md`.
+
 Created April 2017 @author: Sean T. Smith, updated July-Aug 2026.
 """
 
@@ -32,14 +35,17 @@ def lhs_design(n_pnts, n_dims, fixed=None, position="center", rng=None):
     include_endpoint = (position == "edges")
     all_strata = []
     for dim in range(n_dims):
-        available_strata = list(linspace(0, 1, n_tot, endpoint=include_endpoint))
+        strata_edges = list(linspace(0, 1, n_tot, endpoint=include_endpoint))
+        available_idx = list(range(n_tot))
         if fixed is not None:
-            offset = 0 if include_endpoint else δx / 2
             for coordinate in fixed[:, dim]:
-                occupied_position = coordinate - offset
-                i_occupied = min(range(len(available_strata)),
-                                 key=lambda i: abs(available_strata[i] - occupied_position))
-                available_strata.pop(i_occupied)
+                location_idx = min(int(coordinate * n_tot), n_tot - 1)
+                # If the index of this point's location is already claimed, spill to the nearest
+                # still available stratum (only approximating the completion of a full LHS).
+                claimed_idx = min(range(len(available_idx)),
+                                  key=lambda k: abs(available_idx[k] - location_idx))
+                available_idx.pop(claimed_idx)
+        available_strata = [strata_edges[i] for i in available_idx]
         all_strata.append(rng.permutation(available_strata))
     design = array(all_strata).T
     if position == "center":
@@ -198,15 +204,18 @@ def _stochastic_pick(objective, stoch_frac, rng):
     return i_selected
 
 
-def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="cov", beta=0.0,
-                          stoch_frac=0.1, return_weights=False, return_by_index=False, rng=None):
+def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, fixed_ln_pdfs=None,
+                          scale="cov", beta=0.0, stoch_frac=0.1, return_weights=False,
+                          return_by_index=False, rng=None):
     """
     Create a space-filling design w/ `n_pnts` number of output points that is selected in order by
     greedily sub-selecting points from a larger `proposals` set according to best maximin value.
     If the log values of the unscaled distribution are provided for each point, the algorithm is
     modified to density-weighted & tempered greedy maximin (with tempering parameter `beta` — where
     `beta=0.0` reduces to the unweighted algorithm, and `beta=1.0` will result in samples that are
-    approximately representative of the distribution).  Existing `fixed` points can be provided.
+    approximately representative of the distribution).  Existing `fixed` points can be provided —
+    and if `ln_pdfs` were given then corresponding `fixed_ln_pdfs` should also be supplied (using
+    the same distribution and same normalization as `ln_pdfs` for consistent spacing).
     The provided `proposals` should be scaled — options are `None`,  "range", "std" or "cov".
     The greedy optimization has an optional stochastic feature controlled by `stoch_frac`
     specifying the fraction of points considered (`stoch_frac=0.0` is fully deterministic while
@@ -228,7 +237,7 @@ def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
     n_proposals, n_dims = proposals.shape
     props_scaled, fixed_scaled = _scale_util(proposals, fixed, scale)
 
-    # Density weighting: higher-density & larger beta -> smaller length-scale -> further spaced
+    # Density weighting: higher-density & larger beta -> smaller length-scale -> farther spaced
     if ln_pdfs is None:
         l = full(n_proposals, 1.0)
     else:
@@ -244,6 +253,15 @@ def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
         # Initialize with the `fixed` points only:
         n_fixed = fixed.shape[0]
         props_scaled = concatenate((fixed_scaled, props_scaled), axis=0)
+        if ln_pdfs is None:
+            l_fixed = full(n_fixed, 1.0)
+        elif fixed_ln_pdfs is None:
+            raise ValueError("When both `ln_pdfs` & `fixed` are provided, `fixed_ln_pdfs` must "
+                             "also be provided (evaluated from the same distribution, w/ the "
+                             "same normalization as `ln_pdfs`")
+        else:
+            l_fixed = exp(-(beta / n_dims) * fixed_ln_pdfs)
+        l = concatenate((l_fixed, l))
         n_proposals += n_fixed
         i_selected = list(range(n_fixed))
         n_new = 0
