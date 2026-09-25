@@ -34,4 +34,4 @@ pip install -e ".[dev]"
 `bayesian_utilites` is build on the basic python numerical software stack: `numpy`, `scipy`, `matplotlib`, and `numba`.
 
 - The `main` branch depends on a recent version of `scipy>=1.17.0`,
-- A `version_friendly` branch is maintained for older dependence on `scipy>=1.12.0` and also strips any dependence on `numpy`.
+- A `version_friendly` branch is maintained for older dependence on `scipy>=1.12.0` and also strips any dependence on `numba`.
