@@ -295,7 +295,7 @@ def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, fixed_ln_
     if return_weights:
         # Calculate weights based on the number of nearest neighbors (approx. Voronoi cell vol.):
         #  <Referred to in the optimal-quantization literature as: Wasserstein-optimal weights.>
-        counts = bincount(i_nearest, minlength=n_proposals)[i_selected]
+        counts = bincount(i_nearest.astype('int64'), minlength=n_proposals)[i_selected]
         weights = (n_pnts / n_proposals) * counts
     if fixed is not None:
         # Dereference `i_selected` from the concatenated array to `proposals`:
@@ -372,7 +372,7 @@ def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
         # Calculate weights based on the number of nearest neighbors (approx. Voronoi cell vol.):
         #  <Referred to in the optimal-quantization literature as: Wasserstein-optimal weights.>
         i_nearest = props_distances[:, i_selected].argmin(axis=1)
-        counts = bincount(i_nearest, minlength=n_pnts)
+        counts = bincount(i_nearest.astype('int64'), minlength=n_pnts)
         weights = (n_pnts / n_proposals) * counts
 
     # Setup the return arrays according to the input preferences:
