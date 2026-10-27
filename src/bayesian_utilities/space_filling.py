@@ -8,6 +8,7 @@ see `docs/space_filling.md`.
 Created April 2017 @author: Sean T. Smith, updated July-Aug 2026.
 """
 
+from warnings import warn
 from math import ceil, log2
 from numpy import (array, full, linspace, arange, concatenate, tril_indices, unravel_index,
                    bincount, isfinite, outer, sqrt, exp, log, inf)
@@ -383,3 +384,141 @@ def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
     if return_weights:
         ret_val = (ret_val, weights)
     return ret_val
+
+
+def _tile_indices(size, n_out, rng):
+    """Indices of length `n_out` by reshuffling [0, size) each cycle (sampling w/o replacement)."""
+    out = full(n_out, 0, dtype='int64')
+    filled = 0
+    while filled < n_out:
+        perm = rng.permutation(size)
+        take = min(size, n_out - filled)
+        out[filled:filled + take] = perm[:take]
+        filled += take
+    return out
+
+
+def spacefill_permute_design(n_pnts, subsets, subset_ln_pdfs=None,
+                             spacefill_method=greedy_maximin_design, spacefill_kwargs=None,
+                             return_by_index=False, rng=None):
+    """
+    Combine independent `subsets` (a list of arrays, each an MCMC-style sampling of one
+    submodel's parameters) into a single `n_pnts`-point design by space-filling EACH submodel
+    individually to `n_pnts`, then combining by permutation.  This gives zero duplication &
+    optimal per-submodel marginal coverage — the right choice when joint interaction effects
+    are small and the emulator exploits low-order (e.g. co-linear) structure.  (When joint
+    space-filling matters, e.g. for GP emulation, use `combine_spacefill_design` instead.)
+
+    An under-supplied submodel (fewer than `n_pnts` samples) is tiled up to `n_pnts`, forcing
+    some duplication; a warning reports the floor.  `spacefill_method` (w/ `spacefill_kwargs`,
+    e.g. `scale`/`beta`/`stoch_frac`) performs each per-submodel selection; pass `subset_ln_pdfs`
+    (aligned to `subsets`) plus a `beta` in the kwargs to temper.  See `docs/spacefill.md`.
+    """
+    rng = default_rng() if rng is None else rng
+    sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
+    subsets = [array(s) for s in subsets]
+    k, D = len(subsets), n_pnts
+    if subset_ln_pdfs is None:
+        subset_ln_pdfs = [None] * k
+
+    sub_idx = []
+    for i, sub in enumerate(subsets):
+        m_i = sub.shape[0]
+        if m_i >= D:
+            idx = array(spacefill_method(D, sub, ln_pdfs=subset_ln_pdfs[i], return_by_index=True,
+                                         rng=rng, **sf_kwargs), dtype='int64')
+            rng.shuffle(idx)                             # unorder, so the permute isn't aligned
+        else:
+            warn(f"subset {i} has only {m_i} samples for a design of {D} points: forcing at least "
+                 f"{1 - m_i / D:.1%} duplication.  Provide ≳{D} samples to avoid this.")
+            idx = _tile_indices(m_i, D, rng)             # under-supplied: tile up (reshuffled)
+        sub_idx.append(idx)
+
+    if return_by_index:
+        return sub_idx
+    return concatenate([subsets[i][sub_idx[i]] for i in range(k)], axis=1)
+
+
+def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
+                             max_proposals=100_000, spacefill_method=greedy_maximin_design,
+                             spacefill_kwargs=None, return_by_index=False, verbose=False, rng=None):
+    """
+    Combine independent `subsets` (a list of arrays, each an MCMC-style sampling of one
+    submodel's parameters) into a single `n_pnts`-point design by tiling them into joint
+    proposals, then space-filling the joint set — favoring joint space-filling quality (the
+    right choice for e.g. GP emulation, where emulator uncertainty depends on joint distances).
+    (When only per-submodel marginal coverage matters, use `spacefill_permute_design` instead.)
+
+    `f_tol` is the *approximate target* fraction of final points that repeat a submodel's sample
+    (a balance knob trading joint-fill against duplication, NOT a hard constraint).  Realized
+    duplication generally lands at or below `f_tol` — EXCEPT (i) when a submodel's supply is too
+    small (fewer than `n_pnts` samples), forcing more by information content (see warning), or
+    (ii) for strongly peaked marginals w/ `beta=0`, where maximin's tail-seeking inflates it
+    (raise `beta` to mitigate).  The model predicts duplication only within ~2x across the variety
+    of real distributions; for tighter control, iterate on the realized `f`.
+
+    `max_proposals` caps the joint proposal count (the Mitchell/pairwise cost scales w/ it).
+    `spacefill_method` (w/ `spacefill_kwargs`, e.g. `scale`/`beta`/`stoch_frac`) performs both the
+    per-submodel down-select & the final selection; pass `subset_ln_pdfs` (aligned to `subsets`)
+    plus a `beta` in the kwargs to temper (independent submodel log-densities are summed for the
+    joint).  `verbose` reports per-submodel m*, R, α, and estimated f.  See `docs/spacefill.md`.
+    """
+    rng = default_rng() if rng is None else rng
+    sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
+    subsets = [array(s) for s in subsets]
+    k, D = len(subsets), n_pnts
+    if subset_ln_pdfs is None:
+        subset_ln_pdfs = [None] * k
+    m = [s.shape[0] for s in subsets]
+
+    for i, m_i in enumerate(m):
+        if m_i < D:
+            warn(f"subset {i} has only {m_i} samples for a design of {D} points: its marginal "
+                 f"distinctness is capped at {m_i}, forcing at least {1 - m_i / D:.1%} duplication "
+                 f"(regardless of `f_tol`={f_tol}).  Provide ≳{D} samples to avoid this.")
+
+    def _est_f(R, α, γ=0.898):
+        """Estimated per-submodel duplication: occupancy model x empirical maximin over-selection
+        factor c(R) = 1 + γ(1 - 1/R)  (c -> 1 as R -> 1); see `docs/spacefill.md`."""
+        return 0.0 if R <= 1 else (1 + γ * (1 - 1 / R)) * (1 - α * (1 - (1 - 1 / (α * R)) ** R))
+
+    # Pick replication R for the binding submodel so estimated duplication ≈ f_tol (f monotone in
+    # R, so bisect); fall back to the max_proposals cap when slack & to the forced floor 1/α_max:
+    m_min, α_max = min(m), min(m) / D
+    R_cap = max_proposals / m_min
+    if f_tol <= 0.0 or _est_f(R_cap, α_max) <= f_tol:
+        R = R_cap
+    else:
+        lo, hi = 1.0, R_cap
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if _est_f(mid, α_max) < f_tol else (lo, mid)
+        R = 0.5 * (lo + hi)
+    R = max(R, 1.0 / α_max)
+    P = min(int(round(R * m_min)), max_proposals)
+
+    # Per submodel: random down-select to the shared pool (preserve candidate density), tile to P:
+    sub_idx, report = [], []
+    for i, sub in enumerate(subsets):
+        m_i = m[i]
+        m_star = min(P, m_i)
+        keep = rng.choice(m_i, m_star, replace=False) if m_star < m_i else arange(m_i)
+        sub_idx.append(keep[_tile_indices(m_star, P, rng)])
+        report.append((m_star, P / m_star, m_star / D, _est_f(P / m_star, m_star / D)))
+
+    proposals = concatenate([subsets[i][sub_idx[i]] for i in range(k)], axis=1)
+    ln_pdf = (sum(subset_ln_pdfs[i][sub_idx[i]] for i in range(k))
+              if all(lp is not None for lp in subset_ln_pdfs) else None)
+
+    if verbose:
+        print(f"[combine_spacefill_design] method = {spacefill_method.__name__}")
+        print(f"  D = {D}, m = {m}, m_min = {m_min}, α_max = {α_max:.3g}, f_tol = {f_tol}, P = {P}")
+        print(f"  {'sub':>4} {'m':>8} {'m*':>8} {'R':>7} {'α':>7} {'f_est':>9}")
+        for i, (m_star, R_i, α_i, f_i) in enumerate(report):
+            print(f"  {i:>4} {m[i]:>8} {m_star:>8} {R_i:>7.3g} {α_i:>7.3g} {f_i:>9.3%}")
+
+    i_final = array(spacefill_method(D, proposals, ln_pdfs=ln_pdf, return_by_index=True, rng=rng,
+                                     **sf_kwargs), dtype='int64')
+    if return_by_index:
+        return [sub_idx[i][i_final] for i in range(k)]
+    return proposals[i_final]
