@@ -550,13 +550,22 @@ def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
     def _est_f(R, α, γ=0.898):
         """Estimated per-submodel duplication: occupancy model x empirical maximin over-selection
         factor c(R) = 1 + γ(1 - 1/R)  (c -> 1 as R -> 1); see `docs/spacefill.md`."""
-        return 0.0 if R <= 1 else (1 + γ * (1 - 1 / R)) * (1 - α * (1 - (1 - 1 / (α * R)) ** R))
+        if R <= 1:
+            return 0.0
+        base = 1 - 1 / (α * R)
+        if base <= 0:          # α*R <= 1: fewer distinct candidates than selections -> saturated
+            return 1 - α       # (occupancy limit: at most α*D distinct of D -> f = 1 - α)
+        return (1 + γ * (1 - 1 / R)) * (1 - α * (1 - base ** R))
 
     # Pick replication R for the binding submodel so estimated duplication ≈ f_tol (f monotone in
     # R, so bisect); fall back to the max_proposals cap when slack & to the forced floor 1/α_max:
     m_min, α_max = min(m), min(m) / D
     R_cap = max_proposals / m_min
-    if f_tol <= 0.0 or _est_f(R_cap, α_max) <= f_tol:
+    if α_max < 1.0:
+        # Under-supplied binding subset: the forced-replication floor dominates; skip the budget
+        # bisection (f_tol is unreachable — already warned) and just satisfy P >= D:
+        R = 1.0 / α_max
+    elif f_tol <= 0.0 or _est_f(R_cap, α_max) <= f_tol:
         R = R_cap
     else:
         lo, hi = 1.0, R_cap
