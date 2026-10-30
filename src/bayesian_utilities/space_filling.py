@@ -16,6 +16,7 @@ from numpy.linalg import svd
 from numpy.random import default_rng
 from scipy.spatial.distance import cdist
 from scipy.stats import qmc
+import pandas as pd
 
 
 # Generative space-filling designs on a unit box:
@@ -386,6 +387,8 @@ def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
     return ret_val
 
 
+# Combine independent groups of sampled parameters & space-fill by sub-sampling:
+
 def _tile_indices(size, n_out, rng):
     """Indices of length `n_out` by reshuffling [0, size) each cycle (sampling w/o replacement)."""
     out = full(n_out, 0, dtype='int64')
@@ -398,56 +401,124 @@ def _tile_indices(size, n_out, rng):
     return out
 
 
+def _normalize_subsets(subsets):
+    """
+    Accept `subsets` as a list or dict whose items are ndarrays or pandas DataFrames.
+    Return (arrays, keys, frame_meta):
+      arrays     - list of 2-D float ndarrays (the sample values),
+      keys       - list of labels (dict keys, else integer positions),
+      frame_meta - list of (columns, index_name) for items that were DataFrames (else None),
+                   used to reassemble a DataFrame output; `is_frame` = any(meta).
+    """
+    if isinstance(subsets, dict):
+        keys = list(subsets.keys())
+        items = list(subsets.values())
+        is_dict = True
+    else:
+        items = list(subsets)
+        keys = list(range(len(items)))
+        is_dict = False
+    arrays, frame_meta = [], []
+    for it in items:
+        if isinstance(it, pd.DataFrame):
+            frame_meta.append((it.columns, it.index.name))
+            arrays.append(it.to_numpy())
+        else:
+            frame_meta.append(None)
+            arrays.append(array(it))
+    return arrays, keys, frame_meta, is_dict
+
+
+def _align_ln_pdfs(subset_ln_pdfs, keys, is_dict):
+    """Align `subset_ln_pdfs` (None, list, or dict keyed like `subsets`) to the `keys` order,
+    returning a list of per-subset arrays (or None) with values coerced to ndarray."""
+    if subset_ln_pdfs is None:
+        return [None] * len(keys)
+    if isinstance(subset_ln_pdfs, dict):
+        return [None if subset_ln_pdfs.get(key) is None else array(subset_ln_pdfs[key])
+                for key in keys]
+    return [None if lp is None else array(lp) for lp in subset_ln_pdfs]
+
+
+def _assemble_output(arrays, keys, frame_meta, is_dict, sub_idx, i_final=None):
+    """
+    Reassemble the combined design.  `sub_idx[i]` are indices into arrays[i]; `i_final`
+    (JOINT mode) further sub-selects the aligned proposals, or None (already length-D).
+    Returns a DataFrame (MultiIndex columns if keyed & any item was a DataFrame) when any
+    input item was a DataFrame, otherwise a concatenated ndarray.
+    """
+    def _rows(i):
+        idx = sub_idx[i] if i_final is None else sub_idx[i][i_final]
+        return arrays[i][idx]
+
+    if any(fm is not None for fm in frame_meta):
+        blocks = []
+        for i, fm in enumerate(frame_meta):
+            cols = fm[0] if fm is not None else range(arrays[i].shape[1])
+            blocks.append(pd.DataFrame(_rows(i), columns=cols))
+        combined = pd.concat(blocks, axis=1, keys=keys)       # MultiIndex: (label, column)
+        return combined
+    return concatenate([_rows(i) for i in range(len(arrays))], axis=1)
+
+
 def spacefill_permute_design(n_pnts, subsets, subset_ln_pdfs=None,
                              spacefill_method=greedy_maximin_design, spacefill_kwargs=None,
                              return_by_index=False, rng=None):
     """
-    Combine independent `subsets` (a list of arrays, each an MCMC-style sampling of one
-    submodel's parameters) into a single `n_pnts`-point design by space-filling EACH submodel
-    individually to `n_pnts`, then combining by permutation.  This gives zero duplication &
-    optimal per-submodel marginal coverage — the right choice when joint interaction effects
-    are small and the emulator exploits low-order (e.g. co-linear) structure.  (When joint
-    space-filling matters, e.g. for GP emulation, use `combine_spacefill_design` instead.)
+    Combine independent `subsets` into a single `n_pnts`-point design by space-filling EACH
+    submodel individually to `n_pnts`, then combining by permutation.  This gives zero
+    duplication & optimal per-submodel marginal coverage — the right choice when joint
+    interaction effects are small and the emulator exploits low-order (e.g. co-linear)
+    structure.  (When joint space-filling matters, e.g. for GP emulation, use
+    `combine_spacefill_design` instead.)
+
+    `subsets` may be a list or a dict; its items may be ndarrays or pandas DataFrames (an
+    MCMC-style sampling of one submodel's parameters, each).  With a dict, keys label the
+    output; with DataFrame items, the output is a DataFrame (MultiIndex columns if keyed).
+    `subset_ln_pdfs`, when given, aligns to `subsets` (same ordering / keys as the values).
 
     An under-supplied submodel (fewer than `n_pnts` samples) is tiled up to `n_pnts`, forcing
     some duplication; a warning reports the floor.  `spacefill_method` (w/ `spacefill_kwargs`,
     e.g. `scale`/`beta`/`stoch_frac`) performs each per-submodel selection; pass `subset_ln_pdfs`
-    (aligned to `subsets`) plus a `beta` in the kwargs to temper.  See `docs/spacefill.md`.
+    plus a `beta` in the kwargs to temper.  See `docs/spacefill.md`.
     """
     rng = default_rng() if rng is None else rng
     sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
-    subsets = [array(s) for s in subsets]
-    k, D = len(subsets), n_pnts
-    if subset_ln_pdfs is None:
-        subset_ln_pdfs = [None] * k
+    arrays, keys, frame_meta, is_dict = _normalize_subsets(subsets)
+    k, D = len(arrays), n_pnts
+    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, keys, is_dict)
 
     sub_idx = []
-    for i, sub in enumerate(subsets):
+    for i, sub in enumerate(arrays):
         m_i = sub.shape[0]
         if m_i >= D:
-            idx = array(spacefill_method(D, sub, ln_pdfs=subset_ln_pdfs[i], return_by_index=True,
+            idx = array(spacefill_method(D, sub, ln_pdfs=ln_pdfs[i], return_by_index=True,
                                          rng=rng, **sf_kwargs), dtype='int64')
             rng.shuffle(idx)                             # unorder, so the permute isn't aligned
         else:
-            warn(f"subset {i} has only {m_i} samples for a design of {D} points: forcing at least "
-                 f"{1 - m_i / D:.1%} duplication.  Provide ≳{D} samples to avoid this.")
+            warn(f"subset {keys[i]!r} has only {m_i} samples for a design of {D} points: forcing "
+                 f"at least {1 - m_i / D:.1%} duplication.  Provide ≳{D} samples to avoid this.")
             idx = _tile_indices(m_i, D, rng)             # under-supplied: tile up (reshuffled)
         sub_idx.append(idx)
 
     if return_by_index:
-        return sub_idx
-    return concatenate([subsets[i][sub_idx[i]] for i in range(k)], axis=1)
+        return dict(zip(keys, sub_idx)) if is_dict else sub_idx
+    return _assemble_output(arrays, keys, frame_meta, is_dict, sub_idx)
 
 
 def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
                              max_proposals=100_000, spacefill_method=greedy_maximin_design,
                              spacefill_kwargs=None, return_by_index=False, verbose=False, rng=None):
     """
-    Combine independent `subsets` (a list of arrays, each an MCMC-style sampling of one
-    submodel's parameters) into a single `n_pnts`-point design by tiling them into joint
-    proposals, then space-filling the joint set — favoring joint space-filling quality (the
-    right choice for e.g. GP emulation, where emulator uncertainty depends on joint distances).
-    (When only per-submodel marginal coverage matters, use `spacefill_permute_design` instead.)
+    Combine independent `subsets` into a single `n_pnts`-point design by tiling them into joint
+    proposals, then space-filling the joint set — favoring joint space-filling quality (the right
+    choice for e.g. GP emulation, where emulator uncertainty depends on joint distances).  (When
+    only per-submodel marginal coverage matters, use `spacefill_permute_design` instead.)
+
+    `subsets` may be a list or a dict; its items may be ndarrays or pandas DataFrames (an
+    MCMC-style sampling of one submodel's parameters, each).  With a dict, keys label the output;
+    with DataFrame items, the output is a DataFrame (MultiIndex columns if keyed).  `subset_ln_pdfs`,
+    when given, aligns to `subsets` (same ordering / keys as the values).
 
     `f_tol` is the *approximate target* fraction of final points that repeat a submodel's sample
     (a balance knob trading joint-fill against duplication, NOT a hard constraint).  Realized
@@ -459,23 +530,22 @@ def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
 
     `max_proposals` caps the joint proposal count (the Mitchell/pairwise cost scales w/ it).
     `spacefill_method` (w/ `spacefill_kwargs`, e.g. `scale`/`beta`/`stoch_frac`) performs both the
-    per-submodel down-select & the final selection; pass `subset_ln_pdfs` (aligned to `subsets`)
-    plus a `beta` in the kwargs to temper (independent submodel log-densities are summed for the
-    joint).  `verbose` reports per-submodel m*, R, α, and estimated f.  See `docs/spacefill.md`.
+    per-submodel down-select & the final selection; pass `subset_ln_pdfs` plus a `beta` in the
+    kwargs to temper (independent submodel log-densities are summed for the joint).  `verbose`
+    reports per-submodel m*, R, α, and estimated f.  See `docs/spacefill.md`.
     """
     rng = default_rng() if rng is None else rng
     sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
-    subsets = [array(s) for s in subsets]
-    k, D = len(subsets), n_pnts
-    if subset_ln_pdfs is None:
-        subset_ln_pdfs = [None] * k
-    m = [s.shape[0] for s in subsets]
+    arrays, keys, frame_meta, is_dict = _normalize_subsets(subsets)
+    k, D = len(arrays), n_pnts
+    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, keys, is_dict)
+    m = [s.shape[0] for s in arrays]
 
     for i, m_i in enumerate(m):
         if m_i < D:
-            warn(f"subset {i} has only {m_i} samples for a design of {D} points: its marginal "
-                 f"distinctness is capped at {m_i}, forcing at least {1 - m_i / D:.1%} duplication "
-                 f"(regardless of `f_tol`={f_tol}).  Provide ≳{D} samples to avoid this.")
+            warn(f"subset {keys[i]!r} has only {m_i} samples for a design of {D} points: its "
+                 f"marginal distinctness is capped at {m_i}, forcing at least {1 - m_i / D:.1%} "
+                 f"duplication (regardless of `f_tol`={f_tol}).  Provide ≳{D} samples to avoid.")
 
     def _est_f(R, α, γ=0.898):
         """Estimated per-submodel duplication: occupancy model x empirical maximin over-selection
@@ -499,26 +569,27 @@ def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
 
     # Per submodel: random down-select to the shared pool (preserve candidate density), tile to P:
     sub_idx, report = [], []
-    for i, sub in enumerate(subsets):
+    for i, sub in enumerate(arrays):
         m_i = m[i]
         m_star = min(P, m_i)
         keep = rng.choice(m_i, m_star, replace=False) if m_star < m_i else arange(m_i)
         sub_idx.append(keep[_tile_indices(m_star, P, rng)])
         report.append((m_star, P / m_star, m_star / D, _est_f(P / m_star, m_star / D)))
 
-    proposals = concatenate([subsets[i][sub_idx[i]] for i in range(k)], axis=1)
-    ln_pdf = (sum(subset_ln_pdfs[i][sub_idx[i]] for i in range(k))
-              if all(lp is not None for lp in subset_ln_pdfs) else None)
+    proposals = concatenate([arrays[i][sub_idx[i]] for i in range(k)], axis=1)
+    ln_pdf = (sum(ln_pdfs[i][sub_idx[i]] for i in range(k))
+              if all(lp is not None for lp in ln_pdfs) else None)
 
     if verbose:
         print(f"[combine_spacefill_design] method = {spacefill_method.__name__}")
         print(f"  D = {D}, m = {m}, m_min = {m_min}, α_max = {α_max:.3g}, f_tol = {f_tol}, P = {P}")
-        print(f"  {'sub':>4} {'m':>8} {'m*':>8} {'R':>7} {'α':>7} {'f_est':>9}")
+        print(f"  {'sub':>8} {'m':>8} {'m*':>8} {'R':>7} {'α':>7} {'f_est':>9}")
         for i, (m_star, R_i, α_i, f_i) in enumerate(report):
-            print(f"  {i:>4} {m[i]:>8} {m_star:>8} {R_i:>7.3g} {α_i:>7.3g} {f_i:>9.3%}")
+            print(f"  {str(keys[i]):>8} {m[i]:>8} {m_star:>8} {R_i:>7.3g} {α_i:>7.3g} {f_i:>9.3%}")
 
     i_final = array(spacefill_method(D, proposals, ln_pdfs=ln_pdf, return_by_index=True, rng=rng,
                                      **sf_kwargs), dtype='int64')
     if return_by_index:
-        return [sub_idx[i][i_final] for i in range(k)]
-    return proposals[i_final]
+        sel = [sub_idx[i][i_final] for i in range(k)]
+        return dict(zip(keys, sel)) if is_dict else sel
+    return _assemble_output(arrays, keys, frame_meta, is_dict, sub_idx, i_final)

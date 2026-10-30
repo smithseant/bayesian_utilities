@@ -9,6 +9,7 @@ dependencies = [
     "scipy>=1.17.0",
     "numba",
     "matplotlib>=3.11.1",
+    "pandas>=2.0",
 ]
 
 [build-system]
