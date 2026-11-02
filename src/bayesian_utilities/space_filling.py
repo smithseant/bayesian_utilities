@@ -8,25 +8,52 @@ see `docs/space_filling.md`.
 Created April 2017 @author: Sean T. Smith, updated July-Aug 2026.
 """
 
+from warnings import warn
 from math import ceil, log2
+from typing import Callable, Literal, Union, Optional
 from numpy import (array, full, linspace, arange, concatenate, tril_indices, unravel_index,
                    bincount, isfinite, outer, sqrt, exp, log, inf)
 from numpy.linalg import svd
-from numpy.random import default_rng
+from numpy.random import Generator, default_rng
+from numpy.typing import NDArray
 from scipy.spatial.distance import cdist
 from scipy.stats import qmc
+import pandas as pd
+
+# Shared type aliases:
+Scale = Optional[Literal["range", "std", "cov"]]
+Subsets = Union[list, dict]  # list/dict of ndarray or DataFrame items
+LnPdfs = Optional[Union[list, dict]]
+SpacefillMethod = Callable[..., object]
 
 
 # Generative space-filling designs on a unit box:
 
-def lhs_design(n_pnts, n_dims, fixed=None, position="center", rng=None):
+def lhs_design(n_pnts: int, n_dims: int, fixed: Optional[NDArray] = None,
+               position: Literal["center", "edges", "random"] = "center",
+               rng: Optional[Generator] = None) -> NDArray:
     """
-    Sample a latin hypercube design (a space-filling design which ensures a coordinate-aligned
-    uniform stratification developed by Mike Mckay at Los Alamos in 1979) over the unit box w/
-    `n_pnts` number of points & `n_dims` number of dimensions.  If fixed points are provided,
-    their occupied strata are excluded so that the new points complete a `len(fixed) + n_pnts`
-    latin hypercube (or augment an approximate one).  Points within each stratum can be placed
-    at: the 'center', the 'edges', or at a 'random' location within each stratum.
+    Sample a Latin-hypercube design over the unit box — a space-filling design with uniform,
+    coordinate-aligned stratification (one point per stratum in every dimension).
+
+    Parameters
+    ----------
+    n_pnts, n_dims : int
+        Number of points and dimensions of the design.
+    fixed : ndarray, optional
+        Existing points whose occupied strata are excluded, so the new points complete (or
+        approximately augment) a `len(fixed) + n_pnts` Latin hypercube.
+    position : {"center", "edges", "random"}
+        Placement of each point within its stratum.
+    rng : numpy.random.Generator, optional
+
+    Returns
+    -------
+    ndarray of shape (n_pnts, n_dims)
+
+    See Also
+    --------
+    docs/space_filling.md : background and method-selection guidance.
     """
     rng = default_rng() if rng is None else rng
     n_fixed = 0 if fixed is None else len(fixed)
@@ -55,42 +82,69 @@ def lhs_design(n_pnts, n_dims, fixed=None, position="center", rng=None):
     return design
 
 
-def oa_lhs_design(n_pnts, n_dims, rng=None):
+def oa_lhs_design(n_pnts: int, n_dims: int, rng: Optional[Generator] = None) -> NDArray:
     """
-    Sample an orthogonal-array latin hypercube design of strength 2 (a space-filling design which
-    ensures a pairwise stratified uniformity) over the unit box with `n_pnts` number of points &
-    `n_dims` number of dimensions — `n_pnts` must be the square of a prime number which prime must
-    be greater than or equal to `n_dims - 1`.
-    Note:  for orthogonal arrays w/ strength > 2, Sobol is known to be more performant.
-    (This is simply a wrapper on `scipy.stats.qmc.LatinHypercube` for the sake of a uniform calls.)
+    Sample a strength-2 orthogonal-array Latin-hypercube design over the unit box — a space-filling
+    design with pairwise stratified uniformity.  `n_pnts` must be the square of a prime that is
+    at least `n_dims - 1`.  (A thin wrapper on `scipy.stats.qmc.LatinHypercube` for a uniform API;
+    for strength > 2, Sobol is generally more performant.)
+
+    Returns
+    -------
+    ndarray of shape (n_pnts, n_dims)
     """
     sp_lhs = qmc.LatinHypercube(d=n_dims, strength=2, rng=rng)
     return sp_lhs.random(n=n_pnts)
 
 
-def sobol_design(n_pnts, n_dims, rng=None, **kwargs):
+def sobol_design(n_pnts: int, n_dims: int, rng: Optional[Generator] = None, **kwargs) -> NDArray:
     """
-    Sample a Sobol-sequence design (a space-filling design which aims for low discrepancy) over
-    the unit box with `n_pnts` number of points & `n_dims` number of dimensions — `n_pnts` must
-    be an integer power of 2.
-    (This is simply a wrapper on `scipy.stats.qmc.Sobol` for the sake of a uniform call signature.)
+    Sample a Sobol-sequence design over the unit box — a low-discrepancy space-filling design.
+    `n_pnts` must be an integer power of 2.  (A thin wrapper on `scipy.stats.qmc.Sobol` for a
+    uniform API; extra keyword arguments are forwarded.)
+
+    Returns
+    -------
+    ndarray of shape (n_pnts, n_dims)
     """
+
     sp_sobol = qmc.Sobol(d=n_dims, rng=rng, **kwargs)
     return sp_sobol.random_base2(ceil(log2(n_pnts)))
 
 
-def optimal_of_designs(n_pnts, n_dims, n_samples, sampler=lhs_design, optimality="maximin", 
-                       test_pnts=None, pnts2bases=None, **kwargs):
+def optimal_of_designs(n_pnts: int, n_dims: int, n_samples: int,
+                       sampler: Callable[..., NDArray] = lhs_design,
+                       optimality: Literal["maximin", "D", "A", "I", "G"] = "maximin",
+                       test_pnts: Optional[NDArray] = None,
+                       pnts2bases: Optional[Callable[[NDArray], NDArray]] = None,
+                       **kwargs) -> NDArray:
     """
-    Optimize a space-filling property of designs by sampling `n_samples` number of designs from
-    `sampler(n_pnts, n_dims, **kwargs)` over the unit box with `n_pnts` number of points and
-    `n_dims` number of dimensions — and select the one with the best `optimality` property:
-    
-        "maximin" - maximize smallest neighbor distance (for larger closest-pair spacing),
-        "D"       - maximize differential posterior Shannon info. — max(det(XᵀX))
-        "A"       - minimize avg. posterior variance of the linear-parameters — min(trace((XᵀX)⁻¹)),
-        "I"       - minimize the average prediction uncertainty across `test_pnts`,
-        "G"       - minimize the largest prediction uncertainty among `test_pnts`.
+    Draw `n_samples` candidate designs from `sampler(n_pnts, n_dims, **kwargs)` and return the one
+    best satisfying the chosen `optimality` criterion.
+
+    Parameters
+    ----------
+    n_pnts, n_dims : int
+        Size and dimensionality of each candidate design.
+    n_samples : int
+        Number of candidate designs to draw.
+    sampler : callable
+        Generative design function, called as `sampler(n_pnts, n_dims, **kwargs)`.
+    optimality : {"maximin", "D", "A", "I", "G"}
+        - "maximin" : maximize the smallest inter-point distance (ties broken toward fewer
+          repeats of that distance).
+        - "D" : maximize differential posterior Shannon information, max det(XᵀX).
+        - "A" : minimize average posterior variance of the linear parameters, min trace((XᵀX)⁻¹).
+        - "I" : minimize the average prediction uncertainty across `test_pnts`.
+        - "G" : minimize the largest prediction uncertainty among `test_pnts`.
+    test_pnts : ndarray, optional
+        Evaluation points for the "I" and "G" criteria (defaults to the design itself).
+    pnts2bases : callable, optional
+        Maps points to a regression basis matrix X; required for "D", "A", "I", "G".
+
+    Returns
+    -------
+    ndarray of shape (n_pnts, n_dims)
     """
 
     def maximin_opt(design):
@@ -150,8 +204,9 @@ def optimal_of_designs(n_pnts, n_dims, n_samples, sampler=lhs_design, optimality
 
 # Sub-sampling designs for arbitrary densities:
 
-def _scale_util(proposals, fixed, scale):
-    """Scale both `proposals` and `fixed` (when not None) by: `None`, "range", "std", or "cov"."""
+def _scale_util(proposals: NDArray, fixed: Optional[NDArray],
+                scale: Scale) -> tuple[NDArray, Optional[NDArray]]:
+    """Scale `proposals` (and `fixed`, if given) by: None, "range", "std", or "cov" (whitening)."""
     fixed_scaled = None
     if scale is None:
         props_scaled = proposals
@@ -180,11 +235,10 @@ def _scale_util(proposals, fixed, scale):
         raise ValueError(f"unsupported scale: {scale!r}")
     return props_scaled, fixed_scaled
 
-def _stochastic_pick(objective, stoch_frac, rng):
+def _stochastic_pick(objective: NDArray, stoch_frac: float, rng: Generator) -> int:
     """
-    Pick an index from `objective` — sampling from the top `stoch_frac` fraction of candidates
-    w/ a Boltzmann/softmax weighting (whose temperature scales w/ `stoch_frac`).
-    If `stoch_frac == 0.0`, return the deterministic best (`argmin`).
+    Pick an index minimizing `objective`, softmax-sampled over its best `stoch_frac` fraction
+    (temperature scales with `stoch_frac`); deterministic argmin when `stoch_frac == 0`.
     """
     n_all = objective.shape[0]
     if stoch_frac <= 0.0:
@@ -204,34 +258,57 @@ def _stochastic_pick(objective, stoch_frac, rng):
     return i_selected
 
 
-def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, fixed_ln_pdfs=None,
-                          scale="cov", beta=0.0, stoch_frac=0.1, return_weights=False,
-                          return_by_index=False, rng=None):
+def greedy_maximin_design(n_pnts: int, proposals: NDArray, ln_pdfs: Optional[NDArray] = None,
+                          fixed: Optional[NDArray] = None, fixed_ln_pdfs: Optional[NDArray] = None,
+                          scale: Scale = "cov", beta: float = 0.0, stoch_frac: float = 0.1,
+                          return_weights: bool = False, return_by_index: bool = False,
+                          rng: Optional[Generator] = None) -> object:
     """
-    Create a space-filling design w/ `n_pnts` number of output points that is selected in order by
-    greedily sub-selecting points from a larger `proposals` set according to best maximin value.
-    If the log values of the unscaled distribution are provided for each point, the algorithm is
-    modified to density-weighted & tempered greedy maximin (with tempering parameter `beta` — where
-    `beta=0.0` reduces to the unweighted algorithm, and `beta=1.0` will result in samples that are
-    approximately representative of the distribution).  Existing `fixed` points can be provided —
-    and if `ln_pdfs` were given then corresponding `fixed_ln_pdfs` should also be supplied (using
-    the same distribution and same normalization as `ln_pdfs` for consistent spacing).
-    The provided `proposals` should be scaled — options are `None`,  "range", "std" or "cov".
-    The greedy optimization has an optional stochastic feature controlled by `stoch_frac`
-    specifying the fraction of points considered (`stoch_frac=0.0` is fully deterministic while
-    larger values up to `stoch_frac=1.0` increase the candidate pool).
+    Sub-select a space-filling design that greedily identifies `n_pnts` points from a larger
+    `proposals` set by repeatedly taking the point farthest from those already chosen
+    (greedy maximin, a.k.a. progressive Poisson-disk / blue-noise sampling).
 
-    Variations go by different names, but all use the same principles & arrive at similar results:
-    - The baseline additive approach is referred to by statisticians as "greedy-maximin sampling",
-    - The baseline subtractive approach is referred to by computer scientists as "progressive
-      Poisson-disk sampling" or "blue-noise sampling",
-    Although there is a large variety of valid algorithms, one caution is taken here to avoid a
-    naive implementation resulting in computation of O(n_pnts^2 * n_proposals * n_dims) in favor of
-    one that gives O(n_pnts * n_proposals * n_dims).  (Mitchell 1991 demonstrated the first
-    O(n_pnts * n_proposals * n_dims) algorithm, and Bridson 2007 went further by demonstrating an
-    O(n_pnts * n_dims) algorithm — but Bridson seems to only work in low number of dimensions.  So,
-    this implementation opts for the Mitchell approach and seems to be sufficiently fast.)
+    Supplying `ln_pdfs` activates density-weighted, tempered selection: `beta=0` is the unweighted
+    maximin, `beta=1` yields a sample approximately representative of the distribution.
+
+    Parameters
+    ----------
+    n_pnts : int
+        Number of points to select.
+    proposals : ndarray of shape (n_proposals, n_dims)
+        Candidate points to sub-select from.
+    ln_pdfs : ndarray of shape (n_proposals,), optional
+        Log of the (unnormalized) density at each proposal; enables tempering via `beta`.
+    fixed : ndarray, optional
+        Pre-existing points that the selection must space-fill around.
+    fixed_ln_pdfs : ndarray, optional
+        Log-densities for `fixed`; required when both `ln_pdfs` and `fixed` are given, and must
+        use the same distribution and normalization as `ln_pdfs`.
+    scale : {None, "range", "std", "cov"}
+        Pre-scaling of the space in which distances are measured.
+    beta : float
+        Tempering parameter (see above); only active when `ln_pdfs` is given.
+    stoch_frac : float
+        Stochasticity of the greedy step: 0 is deterministic; up to 1 widens the candidate pool.
+    return_weights : bool
+        Also return approximate Voronoi-cell weights (sum to `n_pnts`); when `fixed` is given,
+        returned as a `(fixed_weights, selected_weights)` tuple.
+    return_by_index : bool
+        Return indices into `proposals` rather than the point coordinates.
+    rng : numpy.random.Generator, optional
+
+    Returns
+    -------
+    ndarray or list of int
+        The selected points (or their indices if `return_by_index`), optionally paired with
+        weights if `return_weights`.
+
+    See Also
+    --------
+    docs/space_filling.md : factors affecting behavior, tempering guidance, and the algorithmic
+        complexity considerations (Mitchell 1991 / Bridson 2007).
     """
+    
     rng = default_rng() if rng is None else rng
     choice = rng.choice
     n_proposals, n_dims = proposals.shape
@@ -315,22 +392,54 @@ def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, fixed_ln_
     return ret_val
 
 
-def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="cov", beta=1.0,
-                          stoch_frac=0.1, return_weights=False, return_by_index=False, rng=None):
+def support_points_design(n_pnts: int, proposals: NDArray, ln_pdfs: Optional[NDArray] = None,
+                          fixed: Optional[NDArray] = None, scale: Scale = "cov", beta: float = 1.0,
+                          stoch_frac: float = 0.1, return_weights: bool = False,
+                          return_by_index: bool = False,
+                          rng: Optional[Generator] = None) -> object:
     """
-    Create a space-filling design w/ `n_pnts` number of output points that is selected in order by
-    greedy sub-selecting points from a larger `proposals` set according to a support-points
-    objective.  If the log values of the unscaled distribution are provided for each point, the
-    algorithm is modified to tempered support points (with tempering parameter `beta` — where
-    `beta->0.0` approaches a flat distribution — favoring the most distant points, and `beta=1.0`
-    reduces to the untempered algorithm).  Existing `fixed` points can be provided.
-    Caution: since the fixed points are not assumed to be representative of the distribution,
-    unless `n_pnts` >> `len(fixed)` the resulting samples may also not be representative.
-    The provided `proposals` should be scaled — options are `None`,  "range", "std" or "cov".
-    The greedy optimization has an optional stochastic feature controlled by `stoch_frac`
-    specifying the fraction of points considered (`stoch_frac=0.0` is fully deterministic while
-    larger values up to `stoch_frac=1.0` increase the candidate pool).
+    Sub-select a space-filling design that greedily identifies `n_pnts` points from a larger
+    `proposals` set to minimize an energy-distance (support-points) objective, yielding a
+    selection representative of the proposal distribution.
+
+    Supplying `ln_pdfs` activates tempering: `beta=1` is the untempered objective; `beta->0`
+    flattens the target distribution, favoring the most distant (tail) points.
+
+    Parameters
+    ----------
+    n_pnts : int
+        Number of points to select.
+    proposals : ndarray of shape (n_proposals, n_dims)
+        Candidate points to sub-select from.
+    ln_pdfs : ndarray of shape (n_proposals,), optional
+        Log of the (unnormalized) density at each proposal; enables tempering via `beta`.
+    fixed : ndarray, optional
+        Pre-existing points to select around.  Note: `fixed` is not assumed representative of the
+        distribution, so unless `n_pnts >> len(fixed)` the result may also not be representative.
+    scale : {None, "range", "std", "cov"}
+        Pre-scaling of the space in which distances are measured.
+    beta : float
+        Tempering parameter (see above); only active when `ln_pdfs` is given.
+    stoch_frac : float
+        Stochasticity of the greedy step: 0 is deterministic; up to 1 widens the candidate pool.
+    return_weights : bool
+        Also return approximate Voronoi-cell weights (sum to `n_pnts`).
+    return_by_index : bool
+        Return indices into `proposals` rather than the point coordinates.
+    rng : numpy.random.Generator, optional
+
+    Returns
+    -------
+    ndarray or list of int
+        The selected points (or their indices if `return_by_index`), optionally paired with
+        weights if `return_weights`.
+
+    See Also
+    --------
+    docs/space_filling.md : the ~40k-proposal performance ceiling, tempering guidance, and
+        regime-dependent recommendations relative to greedy maximin.
     """
+    
     rng = default_rng() if rng is None else rng
     choice = rng.choice
     n_proposals, n_dims = proposals.shape
@@ -383,3 +492,275 @@ def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
     if return_weights:
         ret_val = (ret_val, weights)
     return ret_val
+
+
+# Combine independent groups of sampled parameters & space-fill by sub-sampling:
+
+def _tile_indices(size: int, n_out: int, rng: Generator) -> NDArray:
+    """Draw indices of length `n_out`, by repeatedly permuting [0, size) (sampling w/o repl.)."""
+    out = full(n_out, 0, dtype='int64')
+    filled = 0
+    while filled < n_out:
+        perm = rng.permutation(size)
+        take = min(size, n_out - filled)
+        out[filled:filled + take] = perm[:take]
+        filled += take
+    return out
+
+
+def _restructure_subsets(subsets: Subsets) -> tuple[list[NDArray], list, list[Optional[tuple]], bool]:
+    """
+    Restructure list/dict `subsets` of ndarray/DataFrame items into
+    (arrays, keys, column_meta, is_dict) for uniform downstream handling.
+    """
+    if isinstance(subsets, dict):
+        is_dict = True
+        subset_keys = list(subsets.keys())
+        items = list(subsets.values())
+    else:
+        is_dict = False
+        items = list(subsets)
+        subset_keys = list(range(len(items)))
+    subset_arrays, column_names = [], []
+    for it in items:
+        if isinstance(it, pd.DataFrame):
+            column_names.append((it.columns, it.index.name))
+            subset_arrays.append(it.to_numpy())
+        else:
+            column_names.append(None)
+            subset_arrays.append(array(it))
+    return subset_arrays, subset_keys, column_names, is_dict
+
+
+def _align_ln_pdfs(subset_ln_pdfs: LnPdfs, subset_keys: list, is_dict: bool) -> list[Optional[NDArray]]:
+    """Align `subset_ln_pdfs` (None/list/dict) to `subset_keys` order as a list of arrays/None."""
+    if subset_ln_pdfs is None:
+        return [None] * len(subset_keys)
+    if isinstance(subset_ln_pdfs, dict):
+        return [None if subset_ln_pdfs.get(key) is None else array(subset_ln_pdfs[key])
+                for key in subset_keys]
+    return [None if lp is None else array(lp) for lp in subset_ln_pdfs]
+
+
+def _restructure_ouput(subset_arrays: list[NDArray], subset_keys: list,
+                       column_names: list[Optional[tuple]], is_dict: bool,
+                       subset_idx: list[NDArray],
+                       i_fin: Optional[NDArray] = None) -> Union[NDArray, pd.DataFrame]:
+    """
+    Reassemble the combined design from per-subset indices; returns a DataFrame (MultiIndex
+    columns if keyed) when any input item was a DataFrame, else a concatenated ndarray.
+    """
+    def _rows(i):
+        idx = subset_idx[i] if i_fin is None else subset_idx[i][i_fin]
+        return subset_arrays[i][idx]
+
+    if any(fm is not None for fm in column_names):
+        blocks = []
+        for i, fm in enumerate(column_names):
+            cols = fm[0] if fm is not None else range(subset_arrays[i].shape[1])
+            blocks.append(pd.DataFrame(_rows(i), columns=cols))
+        combined = pd.concat(blocks, axis=1, keys=subset_keys)  # MultiIndex: (label, column)
+        return combined
+    return concatenate([_rows(i) for i in range(len(subset_arrays))], axis=1)
+
+
+def spacefill_permute_design(n_pnts: int, subsets: Subsets, subset_ln_pdfs: LnPdfs = None,
+                             spacefill_method: SpacefillMethod = greedy_maximin_design,
+                             spacefill_kwargs: Optional[dict] = None,
+                             return_by_index: bool = False,
+                             rng: Optional[Generator] = None
+                             ) -> Union[NDArray, pd.DataFrame, list, dict]:
+    """
+    Combine independent `subsets` (separately-sampled parameter blocks) into one `n_pnts`-point
+    design by space-filling each block individually to `n_pnts`, then combining by permutation.
+
+    Gives zero within-block duplication and optimal per-block marginal coverage — preferred when
+    joint interaction effects are weak (e.g. an emulator exploiting low-order / co-linear
+    structure).  Use `combine_spacefill_design` instead when joint space-filling matters (e.g. GP
+    emulation).
+
+    Parameters
+    ----------
+    n_pnts : int
+        Size of the combined design.
+    subsets : list or dict of (ndarray or DataFrame)
+        The independent sample blocks.  A dict labels the output by its keys; DataFrame items make
+        the output a DataFrame (with MultiIndex columns if keyed).
+    subset_ln_pdfs : list or dict, optional
+        Per-block log-densities aligned to `subsets`; enables tempering (with a `beta` in
+        `spacefill_kwargs`).
+    spacefill_method : callable
+        Per-block sub-sampling design (`greedy_maximin_design` or `support_points_design`).
+    spacefill_kwargs : dict, optional
+        Options forwarded to `spacefill_method` (e.g. `scale`, `beta`, `stoch_frac`).
+    return_by_index : bool
+        Return per-block indices into `subsets` (mirroring list/dict input) instead of values.
+    rng : numpy.random.Generator, optional
+
+    Returns
+    -------
+    ndarray, DataFrame, list, or dict
+        The combined design, or per-block selection indices if `return_by_index`.
+
+    Warns
+    -----
+    An under-supplied block (fewer than `n_pnts` samples) is tiled up, forcing duplication; the
+    floor `1 - m/n_pnts` is reported.
+
+    See Also
+    --------
+    docs/space_filling.md : the combine-vs-permute trade-off and which to use.
+    """
+    
+    rng = default_rng() if rng is None else rng
+    sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
+    subset_arrays, subset_keys, column_names, is_dict = _restructure_subsets(subsets)
+    k, D = len(subset_arrays), n_pnts
+    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict)
+
+    subset_idx = []
+    for i, subset in enumerate(subset_arrays):
+        m_i = subset.shape[0]
+        if m_i >= D:
+            idx = array(spacefill_method(D, subset, ln_pdfs=ln_pdfs[i], return_by_index=True,
+                                         rng=rng, **sf_kwargs), dtype='int64')
+            rng.shuffle(idx)  # unorder, so the permute isn't aligned
+        else:
+            warn(f"subset {subset_keys[i]!r} has only {m_i} samples for a design of {D} points: "
+                 f"forcing at least {1 - m_i / D:.1%} duplication.")
+            idx = _tile_indices(m_i, D, rng)  # under-supplied: tile up (reshuffled)
+        subset_idx.append(idx)
+
+    if return_by_index:
+        return dict(zip(subset_keys, subset_idx)) if is_dict else subset_idx
+    return _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx)
+
+
+def combine_spacefill_design(n_pnts: int, subsets: Subsets, subset_ln_pdfs: LnPdfs = None,
+                             f_tol: float = 0.05, max_proposals: int = 100_000,
+                             spacefill_method: SpacefillMethod = greedy_maximin_design,
+                             spacefill_kwargs: Optional[dict] = None,
+                             return_by_index: bool = False, verbose: bool = False,
+                             rng: Optional[Generator] = None
+                             ) -> Union[NDArray, pd.DataFrame, list, dict]:
+    """
+    Combine independent `subsets` (separately-sampled parameter blocks) into one `n_pnts`-point
+    design by tiling the blocks into joint proposals, then space-filling the joint set.
+
+    Favors joint space-filling quality — preferred when joint inter-point distances matter (e.g.
+    GP emulation).  Use `spacefill_permute_design` instead when only per-block marginal coverage
+    is needed.
+
+    Parameters
+    ----------
+    n_pnts : int
+        Size of the combined design.
+    subsets : list or dict of (ndarray or DataFrame)
+        The independent sample blocks.  A dict labels the output by its keys; DataFrame items make
+        the output a DataFrame (with MultiIndex columns if keyed).
+    subset_ln_pdfs : list or dict, optional
+        Per-block log-densities aligned to `subsets`; summed into a joint log-density to enable
+        tempering (with a `beta` in `spacefill_kwargs`).
+    f_tol : float
+        Approximate target fraction of final points that repeat a block's sample (a balance knob
+        trading joint-fill against duplication, NOT a hard constraint).  See Notes.
+    max_proposals : int
+        Cap on the joint proposal count (the pairwise selection cost scales with it).
+    spacefill_method : callable
+        Sub-sampling design used for both the per-block down-select and the final joint selection.
+    spacefill_kwargs : dict, optional
+        Options forwarded to `spacefill_method` (e.g. `scale`, `beta`, `stoch_frac`).
+    return_by_index : bool
+        Return per-block indices into `subsets` (mirroring list/dict input) instead of values.
+    verbose : bool
+        Print the per-block m*, replication R, abundance α, and estimated duplication f.
+    rng : numpy.random.Generator, optional
+
+    Returns
+    -------
+    ndarray, DataFrame, list, or dict
+        The combined design, or per-block selection indices if `return_by_index`.
+
+    Notes
+    -----
+    Realized duplication usually lands at or below `f_tol`, with two exceptions: (i) an
+    under-supplied block (fewer than `n_pnts` samples) forces duplication by information content
+    (a warning reports the floor `1 - m/n_pnts`); (ii) strongly peaked marginals selected with
+    `beta=0` over-duplicate (raise `beta` to mitigate).  The duplication model is accurate only
+    to within ~2x across varied distributions; for tight control, iterate on the realized f.
+
+    See Also
+    --------
+    docs/space_filling.md : the duplication model, the combine-vs-permute trade-off, and the
+        three supply regimes (abundant / deficient / intermediate).
+    """
+    
+    rng = default_rng() if rng is None else rng
+    sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
+    subset_arrays, subset_keys, column_names, is_dict = _restructure_subsets(subsets)
+    k, D = len(subset_arrays), n_pnts
+    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict)
+    m = [s.shape[0] for s in subset_arrays]
+
+    for i, m_i in enumerate(m):
+        if m_i < D:
+            warn(f"subset {subset_keys[i]!r} has only {m_i} samples for a design of {D} points: "
+                 f"marginal distinctness is capped at {m_i}, forcing at least {1 - m_i / D:.1%} "
+                 f"duplication (regardless of `f_tol`={f_tol}).")
+
+    def _estimate_f(R, α, γ=0.898):
+        """Estimated per-submodel duplication: occupancy model x empirical maximin over-selection
+        factor c(R) = 1 + γ(1 - 1/R)  (c -> 1 as R -> 1); see `docs/spacefill.md`."""
+        if R <= 1:
+            return 0.0
+        base = 1 - 1 / (α * R)
+        if base <= 0:     # α*R <= 1: fewer distinct candidates than selections -> saturated
+            return 1 - α  #           (occupancy limit: at most α*D distinct of D -> f = 1 - α)
+        return (1 + γ * (1 - 1 / R)) * (1 - α * (1 - base ** R))
+
+    # Pick replication R for the binding submodel so estimated duplication ≈ f_tol (f monotone in
+    # R, so bisect); fall back to the max_proposals cap when slack & to the forced floor 1/α_max:
+    m_min, α_max = min(m), min(m) / D
+    R_cap = max_proposals / m_min
+    if α_max < 1.0:
+        # Under-supplied binding subset: the forced-replication floor dominates; skip the budget
+        # bisection (f_tol is unreachable — already warned) and just satisfy P >= D:
+        R = 1.0 / α_max
+    elif f_tol <= 0.0 or _estimate_f(R_cap, α_max) <= f_tol:
+        R = R_cap
+    else:
+        lo, hi = 1.0, R_cap
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if _estimate_f(mid, α_max) < f_tol else (lo, mid)
+        R = 0.5 * (lo + hi)
+    R = max(R, 1.0 / α_max)
+    P = min(int(round(R * m_min)), max_proposals)
+
+    # Per subset: random down-select to the shared pool (preserve candidate density), tile to P:
+    subset_idx, report = [], []
+    for i, subset in enumerate(subset_arrays):
+        m_i = m[i]
+        m_star = min(P, m_i)
+        keep = rng.choice(m_i, m_star, replace=False) if m_star < m_i else arange(m_i)
+        subset_idx.append(keep[_tile_indices(m_star, P, rng)])
+        report.append((m_star, P / m_star, m_star / D, _estimate_f(P / m_star, m_star / D)))
+
+    proposals = concatenate([subset_arrays[i][subset_idx[i]] for i in range(k)], axis=1)
+    ln_pdf = (sum(ln_pdfs[i][subset_idx[i]] for i in range(k))
+              if all(lp is not None for lp in ln_pdfs) else None)
+
+    if verbose:
+        print(f"[combine_spacefill_design] method = {spacefill_method.__name__}")
+        print(f"  D = {D}, m = {m}, m_min = {m_min}, α_max = {α_max:.3g}, f_tol = {f_tol}, P = {P}")
+        print(f"  {'subset':>8} {'m':>8} {'m*':>8} {'R':>7} {'α':>7} {'f_est':>9}")
+        for i, (m_star, R_i, α_i, f_i) in enumerate(report):
+            print(f"  {str(subset_keys[i]):>8} {m[i]:>8} {m_star:>8} {R_i:>7.3g} {α_i:>7.3g} "
+                  f"{f_i:>9.3%}")
+
+    i_fin = array(spacefill_method(D, proposals, ln_pdfs=ln_pdf, return_by_index=True, rng=rng,
+                                   **sf_kwargs), dtype='int64')
+    if return_by_index:
+        sel = [subset_idx[i][i_fin] for i in range(k)]
+        return dict(zip(subset_keys, sel)) if is_dict else sel
+    return _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx, i_fin)

@@ -18,6 +18,7 @@ The space-filling methods are subdivided into **generative** designs (for unifor
 
 - **Generative:**  `lhs_design`, `oa_lhs_design`, `sobol_design`, `optimal_of_designs`
 - **Sub-sampling:**  `greedy_maximin_design`, `support_points_design`
+- **Combining independent sample sets:**  `spacefill_permute_design`, `combine_spacefill_design`
 
 
 ## Observations & recommendations
@@ -38,3 +39,56 @@ Recommendations for each method are based on these factors.  They are also limit
 - Each method performs somewhat better on its native end of the tempering spectrum.  Greedy maximin does more poorly for $\beta \gtrsim 2/3$, while support points struggles at the other extreme, $\beta \lesssim 0.1$.  To emphasize, these values represent very soft guidelines rather than hard thresholds.
 - As mentioned, both methods deteriorate with small number of final design points — but greedy-maximin tends to break down first.  One specific observation is that (in addition to the outer-shell behavior), the greedy maximin method tends to under sample the concave side of sharply curved density contours and over sample the convex side.  This effect is a natural consequence of optimizing for neighbor distance when too few points are available to resolve the geometry and fill the volume of the distribution.  For this reason, in the sparse regime for number of points in the final design it is recommended to use the support-points method.
 - When the number of design points is large relative to the number of active dimensions, greedy-maximin sub-selection subsampling appears to provides better qualitative behavior and is recommended as a starting point in that regime.
+
+
+### Algorithmic notes: greedy maximin and blue-noise sampling
+
+A connection worth drawing out explicitly, because it is too often overlooked:  the greedy-maximin sub-sampling used here was developed independently in two communities, under different names and different motivations, and they arrive at essentially the same construction.
+
+- **Statistics / design of experiments** calls the additive form *greedy-maximin sampling*:  start from a seed and repeatedly add the candidate point that is farthest from all points already selected, maximizing the minimum inter-point distance as the design grows.
+- **Computer graphics** calls the (often subtractive) form *Poisson-disk sampling* or blue-noise sampling*:  distribute points so that no two are closer than some minimum radius, producing a spectrum with suppressed low-frequency content — the "blue" in blue noise — which the eye (and many numerical integrators) find desirable because it avoids both clumping and regular-grid aliasing.
+
+The design-of-experiments interest is that such a set space-fills a region evenly; the graphics interest is that it looks and integrates well.  These are two views of the same geometric object.  Recognizing the equivalence is practically useful, because the graphics community has invested heavily in *fast* algorithms, and that work transfers directly.
+
+The naive additive algorithm — at each of `n_pnts` steps, recompute every candidate's distance to every selected point — costs `O(n_pnts² · n_proposals · n_dims)`.  The key improvement is to maintain, for each candidate, only its distance to the *nearest* selected point, updating that single value against each newly added point; this drops the cost to `O(n_pnts · n_proposals · n_dims)`.  This is the structure Mitchell (1991) introduced (as "best-candidate" sampling), and it is the approach taken here — a running nearest-selected-distance array that is updated incrementally as each point is chosen, which is fast enough in practice for the proposal sizes and dimensionalities of interest.
+
+Bridson (2007) went further, achieving `O(n_pnts · n_dims)` by using a background grid to restrict the neighbor search to a local neighborhood rather than the full proposal set.  That elegant result is, however, effective mainly in low dimensions:  the number of grid cells to check grows exponentially with dimension (the curse of dimensionality strikes the grid), and the approach assumes generation over a continuous domain rather than sub-selection from a fixed proposal set. For the moderate-to-high-dimensional sub-sampling problems this toolkit targets, Mitchell's `O(n_pnts · n_proposals · n_dims)` form is the pragmatic choice and is retained here.
+
+*(The density-weighted and tempered variant used when probability information is available follows the same incremental-update structure, with inter-point distances rescaled by a per-point length-scale derived from the local density.)*
+
+
+## Combining independent sample sets
+
+A situation that arises in practice is when the parameter vector splits into independent blocks — sub-models whose parameters were each sampled separately — so that one is handed several distinct sample sets (of possibly different sizes) rather than a single joint sampling.  Because the blocks are independent, any pairing of one block's sample with another's is a legitimate joint sample; the task is to assemble a single space-filling design of the desired size from these independent pieces.  Two routines address this: `spacefill_permute_design` and `combine_spacefill_design`.  They accept the sample sets as either a list or a dict, with items that are either ndarrays or pandas DataFrames (keyed/labeled output follows naturally from a dict input or DataFrame items).
+
+The subtlety is that there are two sensible strategies, and they are *not* equivalent — nor is one universally better:
+
+- **Combine, then space-fill** (`combine_spacefill_design`):  tile the blocks together into a large set of joint proposals, then run a single space-filling sub-selection over that joint set.  This directly optimizes *joint* space-filling quality, which is what matters for GP emulation (where predictive uncertainty depends on joint inter-point distances).
+- **Space-fill, then combine** (`spacefill_permute_design`):  space-fill each block individually down to the final design size, then stitch the blocks together by a random permutation (as in the pairing of Latin-hypercube columns).  This gives optimal *per-block marginal* coverage with zero within-block duplication, which is the better choice when joint interaction effects are weak and the emulator leans on low-order (e.g. nearly co-linear) structure.
+
+### The duplication trade-off
+
+The reason the two strategies differ at all is duplication.  In the combine-first strategy, each block's samples must be tiled (repeated) to build enough joint proposals; the final sub-selection can then pick the *same* block sample more than once (paired with different partners), because those repeats sit at genuinely different joint locations.  The result is some fraction of the final design that repeats a block's sample within that block's marginal — call it the duplication fraction $f$.  The space-fill-first strategy has $f = 0$ by construction (each block is reduced to distinct points before pairing).
+
+`combine_spacefill_design` exposes a single knob, `f_tol`, to control this.  It is an *approximate target* for $f$ — a balance knob, not a hard constraint — and internally sets the replication factor so the predicted duplication meets it.  A model for the expected duplication (and its empirical calibration) is derived in the accompanying technical note; two caveats are worth stating here:
+- When a block is **under-supplied** — fewer samples than the requested design size — some duplication is forced by the information content of that sampling (the distinct-value count simply cannot exceed the sample count).  Both routines warn in this case and report the unavoidable floor; the honest remedy is to provide more samples for that block.
+- For **strongly peaked marginals selected with $\beta = 0$**, greedy maximin's preference for the tails inflates duplication beyond the simple model.  Raising $\beta$ mitigates this (it is, in any case, the recommended practice for peaked distributions per the tempering guidance above).  Across the variety of real distributions the duplication model should be trusted only to within roughly a factor of two; for tight control, iterate on the realized $f$.
+
+### Which to use
+
+A performance comparison (detailed in the technical note) found that the two strategies are *Pareto-incomparable*: the combine-first design always wins on the joint space-filling metric, while the space-fill-first design always wins on per-block marginal coverage — neither dominates across sample abundance.  There is no abundance threshold at which one simply becomes correct; the choice reflects which property the emulation actually needs.  That said, the magnitudes make the practical guidance asymmetric:  the combine-first joint-fill advantage is typically small, whereas the duplication it costs is not negligible.  Accordingly:
+
+- Use **`combine_spacefill_design`** when joint space-filling genuinely matters — the GP-emulation case.
+- Use **`spacefill_permute_design`** when only per-block marginal coverage is needed — weak interaction effects, low-order structure.
+- **When unsure, lean toward the permute (space-fill-first) design**: the joint-fill forgone is small, while the duplication avoided is real.
+
+### Behavior across supply regimes
+
+The behavior of `combine_spacefill_design` organizes into three regimes, set by the size of the smallest (binding) block relative to the design size:
+- **Abundant** (smallest block much larger than the design):  replication can be generous, giving a rich joint proposal set with little duplication.
+- **Deficient** (smallest block smaller than the design):  duplication is forced by information content and capped at $1 - m_{\min}/D$; the permute strategy ("space-fill each, then stitch") is the natural fallback, and more samples are the real fix.
+- **Intermediate**:  `f_tol` is the usable control, guided by the duplication model.
+
+Both routines accept the same `spacefill_method` / `spacefill_kwargs` interface as the underlying sub-sampling designs, so greedy maximin or support points (and their `scale`, `beta`, `stoch_frac` options) apply here as well; supplying per-block log-densities enables tempering of the joint selection (the independent block log-densities are summed to form the joint log-density).
+
+*A fuller account — the logical justification, the derivation of the duplication model and its empirical calibration, and the behavioral analysis summarized above — is given in the accompanying technical note (see `<reference to be added>`).*
