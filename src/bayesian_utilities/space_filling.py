@@ -10,18 +10,28 @@ Created April 2017 @author: Sean T. Smith, updated July-Aug 2026.
 
 from warnings import warn
 from math import ceil, log2
+from typing import Callable, Literal, Union, Optional
 from numpy import (array, full, linspace, arange, concatenate, tril_indices, unravel_index,
                    bincount, isfinite, outer, sqrt, exp, log, inf)
 from numpy.linalg import svd
-from numpy.random import default_rng
+from numpy.random import Generator, default_rng
+from numpy.typing import NDArray
 from scipy.spatial.distance import cdist
 from scipy.stats import qmc
 import pandas as pd
 
+# Shared type aliases:
+Scale = Optional[Literal["range", "std", "cov"]]
+Subsets = Union[list, dict]  # list/dict of ndarray or DataFrame items
+LnPdfs = Optional[Union[list, dict]]
+SpacefillMethod = Callable[..., object]
+
 
 # Generative space-filling designs on a unit box:
 
-def lhs_design(n_pnts, n_dims, fixed=None, position="center", rng=None):
+def lhs_design(n_pnts: int, n_dims: int, fixed: Optional[NDArray] = None,
+               position: Literal["center", "edges", "random"] = "center",
+               rng: Optional[Generator] = None) -> NDArray:
     """
     Sample a latin hypercube design (a space-filling design which ensures a coordinate-aligned
     uniform stratification developed by Mike Mckay at Los Alamos in 1979) over the unit box w/
@@ -57,7 +67,7 @@ def lhs_design(n_pnts, n_dims, fixed=None, position="center", rng=None):
     return design
 
 
-def oa_lhs_design(n_pnts, n_dims, rng=None):
+def oa_lhs_design(n_pnts: int, n_dims: int, rng: Optional[Generator] = None) -> NDArray:
     """
     Sample an orthogonal-array latin hypercube design of strength 2 (a space-filling design which
     ensures a pairwise stratified uniformity) over the unit box with `n_pnts` number of points &
@@ -70,7 +80,7 @@ def oa_lhs_design(n_pnts, n_dims, rng=None):
     return sp_lhs.random(n=n_pnts)
 
 
-def sobol_design(n_pnts, n_dims, rng=None, **kwargs):
+def sobol_design(n_pnts: int, n_dims: int, rng: Optional[Generator] = None, **kwargs) -> NDArray:
     """
     Sample a Sobol-sequence design (a space-filling design which aims for low discrepancy) over
     the unit box with `n_pnts` number of points & `n_dims` number of dimensions — `n_pnts` must
@@ -81,8 +91,12 @@ def sobol_design(n_pnts, n_dims, rng=None, **kwargs):
     return sp_sobol.random_base2(ceil(log2(n_pnts)))
 
 
-def optimal_of_designs(n_pnts, n_dims, n_samples, sampler=lhs_design, optimality="maximin", 
-                       test_pnts=None, pnts2bases=None, **kwargs):
+def optimal_of_designs(n_pnts: int, n_dims: int, n_samples: int,
+                       sampler: Callable[..., NDArray] = lhs_design,
+                       optimality: Literal["maximin", "D", "A", "I", "G"] = "maximin",
+                       test_pnts: Optional[NDArray] = None,
+                       pnts2bases: Optional[Callable[[NDArray], NDArray]] = None,
+                       **kwargs) -> NDArray:
     """
     Optimize a space-filling property of designs by sampling `n_samples` number of designs from
     `sampler(n_pnts, n_dims, **kwargs)` over the unit box with `n_pnts` number of points and
@@ -152,7 +166,8 @@ def optimal_of_designs(n_pnts, n_dims, n_samples, sampler=lhs_design, optimality
 
 # Sub-sampling designs for arbitrary densities:
 
-def _scale_util(proposals, fixed, scale):
+def _scale_util(proposals: NDArray, fixed: Optional[NDArray],
+                scale: Scale) -> tuple[NDArray, Optional[NDArray]]:
     """Scale both `proposals` and `fixed` (when not None) by: `None`, "range", "std", or "cov"."""
     fixed_scaled = None
     if scale is None:
@@ -182,7 +197,7 @@ def _scale_util(proposals, fixed, scale):
         raise ValueError(f"unsupported scale: {scale!r}")
     return props_scaled, fixed_scaled
 
-def _stochastic_pick(objective, stoch_frac, rng):
+def _stochastic_pick(objective: NDArray, stoch_frac: float, rng: Generator) -> int:
     """
     Pick an index from `objective` — sampling from the top `stoch_frac` fraction of candidates
     w/ a Boltzmann/softmax weighting (whose temperature scales w/ `stoch_frac`).
@@ -206,9 +221,11 @@ def _stochastic_pick(objective, stoch_frac, rng):
     return i_selected
 
 
-def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, fixed_ln_pdfs=None,
-                          scale="cov", beta=0.0, stoch_frac=0.1, return_weights=False,
-                          return_by_index=False, rng=None):
+def greedy_maximin_design(n_pnts: int, proposals: NDArray, ln_pdfs: Optional[NDArray] = None,
+                          fixed: Optional[NDArray] = None, fixed_ln_pdfs: Optional[NDArray] = None,
+                          scale: Scale = "cov", beta: float = 0.0, stoch_frac: float = 0.1,
+                          return_weights: bool = False, return_by_index: bool = False,
+                          rng: Optional[Generator] = None) -> object:
     """
     Create a space-filling design w/ `n_pnts` number of output points that is selected in order by
     greedily sub-selecting points from a larger `proposals` set according to best maximin value.
@@ -317,8 +334,11 @@ def greedy_maximin_design(n_pnts, proposals, ln_pdfs=None, fixed=None, fixed_ln_
     return ret_val
 
 
-def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="cov", beta=1.0,
-                          stoch_frac=0.1, return_weights=False, return_by_index=False, rng=None):
+def support_points_design(n_pnts: int, proposals: NDArray, ln_pdfs: Optional[NDArray] = None,
+                          fixed: Optional[NDArray] = None, scale: Scale = "cov", beta: float = 1.0,
+                          stoch_frac: float = 0.1, return_weights: bool = False,
+                          return_by_index: bool = False,
+                          rng: Optional[Generator] = None) -> object:
     """
     Create a space-filling design w/ `n_pnts` number of output points that is selected in order by
     greedy sub-selecting points from a larger `proposals` set according to a support-points
@@ -389,7 +409,7 @@ def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
 
 # Combine independent groups of sampled parameters & space-fill by sub-sampling:
 
-def _tile_indices(size, n_out, rng):
+def _tile_indices(size: int, n_out: int, rng: Generator) -> NDArray:
     """Create indices of length `n_out` by repeatedly sampling from [0, size) w/o replacement."""
     out = full(n_out, 0, dtype='int64')
     filled = 0
@@ -401,7 +421,7 @@ def _tile_indices(size, n_out, rng):
     return out
 
 
-def _restructure_subsets(subsets):
+def _restructure_subsets(subsets: Subsets) -> tuple[list[NDArray], list, list[Optional[tuple]], bool]:
     """
     Accept `subsets` as a list or dict whose items are ndarrays or pandas DataFrames.
     Return in the form `subset_arrays`, `subset_keys`, `column_names`:
@@ -429,7 +449,7 @@ def _restructure_subsets(subsets):
     return subset_arrays, subset_keys, column_names, is_dict
 
 
-def _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict):
+def _align_ln_pdfs(subset_ln_pdfs: LnPdfs, subset_keys: list, is_dict: bool) -> list[Optional[NDArray]]:
     """
     Align `subset_ln_pdfs` (None, list, or dict keyed like `subsets`) to the `subset_keys` order,
     returning a list of per-subset arrays (or None) with values coerced to ndarray.
@@ -442,7 +462,10 @@ def _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict):
     return [None if lp is None else array(lp) for lp in subset_ln_pdfs]
 
 
-def _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx, i_fin=None):
+def _restructure_ouput(subset_arrays: list[NDArray], subset_keys: list,
+                       column_names: list[Optional[tuple]], is_dict: bool,
+                       subset_idx: list[NDArray],
+                       i_fin: Optional[NDArray] = None) -> Union[NDArray, pd.DataFrame]:
     """
     Reassemble the combined design.  `subset_idx[i]` are indices into subset_arrays[i]; `i_fin`
     (JOINT mode) further sub-selects the aligned proposals, or None (already length-D).
@@ -463,9 +486,12 @@ def _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset
     return concatenate([_rows(i) for i in range(len(subset_arrays))], axis=1)
 
 
-def spacefill_permute_design(n_pnts, subsets, subset_ln_pdfs=None,
-                             spacefill_method=greedy_maximin_design, spacefill_kwargs=None,
-                             return_by_index=False, rng=None):
+def spacefill_permute_design(n_pnts: int, subsets: Subsets, subset_ln_pdfs: LnPdfs = None,
+                             spacefill_method: SpacefillMethod = greedy_maximin_design,
+                             spacefill_kwargs: Optional[dict] = None,
+                             return_by_index: bool = False,
+                             rng: Optional[Generator] = None
+                             ) -> Union[NDArray, pd.DataFrame, list, dict]:
     """
     Combine independent `subsets` into a single `n_pnts`-point design by space-filling EACH
     submodel individually to `n_pnts`, then combining by permutation.  This gives zero
@@ -508,9 +534,13 @@ def spacefill_permute_design(n_pnts, subsets, subset_ln_pdfs=None,
     return _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx)
 
 
-def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
-                             max_proposals=100_000, spacefill_method=greedy_maximin_design,
-                             spacefill_kwargs=None, return_by_index=False, verbose=False, rng=None):
+def combine_spacefill_design(n_pnts: int, subsets: Subsets, subset_ln_pdfs: LnPdfs = None,
+                             f_tol: float = 0.05, max_proposals: int = 100_000,
+                             spacefill_method: SpacefillMethod = greedy_maximin_design,
+                             spacefill_kwargs: Optional[dict] = None,
+                             return_by_index: bool = False, verbose: bool = False,
+                             rng: Optional[Generator] = None
+                             ) -> Union[NDArray, pd.DataFrame, list, dict]:
     """
     Combine independent `subsets` into a single `n_pnts`-point design by tiling them into joint
     proposals, then space-filling the joint set — favoring joint space-filling quality (the right
