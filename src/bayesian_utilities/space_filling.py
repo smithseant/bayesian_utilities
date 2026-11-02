@@ -390,7 +390,7 @@ def support_points_design(n_pnts, proposals, ln_pdfs=None, fixed=None, scale="co
 # Combine independent groups of sampled parameters & space-fill by sub-sampling:
 
 def _tile_indices(size, n_out, rng):
-    """Indices of length `n_out` by reshuffling [0, size) each cycle (sampling w/o replacement)."""
+    """Create indices of length `n_out` by repeatedly sampling from [0, size) w/o replacement."""
     out = full(n_out, 0, dtype='int64')
     filled = 0
     while filled < n_out:
@@ -401,64 +401,66 @@ def _tile_indices(size, n_out, rng):
     return out
 
 
-def _normalize_subsets(subsets):
+def _restructure_subsets(subsets):
     """
     Accept `subsets` as a list or dict whose items are ndarrays or pandas DataFrames.
-    Return (arrays, keys, frame_meta):
-      arrays     - list of 2-D float ndarrays (the sample values),
-      keys       - list of labels (dict keys, else integer positions),
-      frame_meta - list of (columns, index_name) for items that were DataFrames (else None),
-                   used to reassemble a DataFrame output; `is_frame` = any(meta).
+    Return in the form `subset_arrays`, `subset_keys`, `column_names`:
+      subset_arrays - list of 2-D float ndarrays (the sample values),
+      subset_keys   - list of labels (dict keys, else integer positions),
+      column_names  - list of (columns, index_name) for items that were DataFrames (else None),
+                      used to reassemble a DataFrame output; `is_frame` = any(meta).
     """
     if isinstance(subsets, dict):
-        keys = list(subsets.keys())
-        items = list(subsets.values())
         is_dict = True
+        subset_keys = list(subsets.keys())
+        items = list(subsets.values())
     else:
-        items = list(subsets)
-        keys = list(range(len(items)))
         is_dict = False
-    arrays, frame_meta = [], []
+        items = list(subsets)
+        subset_keys = list(range(len(items)))
+    subset_arrays, column_names = [], []
     for it in items:
         if isinstance(it, pd.DataFrame):
-            frame_meta.append((it.columns, it.index.name))
-            arrays.append(it.to_numpy())
+            column_names.append((it.columns, it.index.name))
+            subset_arrays.append(it.to_numpy())
         else:
-            frame_meta.append(None)
-            arrays.append(array(it))
-    return arrays, keys, frame_meta, is_dict
+            column_names.append(None)
+            subset_arrays.append(array(it))
+    return subset_arrays, subset_keys, column_names, is_dict
 
 
-def _align_ln_pdfs(subset_ln_pdfs, keys, is_dict):
-    """Align `subset_ln_pdfs` (None, list, or dict keyed like `subsets`) to the `keys` order,
-    returning a list of per-subset arrays (or None) with values coerced to ndarray."""
+def _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict):
+    """
+    Align `subset_ln_pdfs` (None, list, or dict keyed like `subsets`) to the `subset_keys` order,
+    returning a list of per-subset arrays (or None) with values coerced to ndarray.
+    """
     if subset_ln_pdfs is None:
-        return [None] * len(keys)
+        return [None] * len(subset_keys)
     if isinstance(subset_ln_pdfs, dict):
         return [None if subset_ln_pdfs.get(key) is None else array(subset_ln_pdfs[key])
-                for key in keys]
+                for key in subset_keys]
     return [None if lp is None else array(lp) for lp in subset_ln_pdfs]
 
 
-def _assemble_output(arrays, keys, frame_meta, is_dict, sub_idx, i_final=None):
+def _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx, i_fin=None):
     """
-    Reassemble the combined design.  `sub_idx[i]` are indices into arrays[i]; `i_final`
+    Reassemble the combined design.  `subset_idx[i]` are indices into subset_arrays[i]; `i_fin`
     (JOINT mode) further sub-selects the aligned proposals, or None (already length-D).
     Returns a DataFrame (MultiIndex columns if keyed & any item was a DataFrame) when any
     input item was a DataFrame, otherwise a concatenated ndarray.
     """
     def _rows(i):
-        idx = sub_idx[i] if i_final is None else sub_idx[i][i_final]
-        return arrays[i][idx]
+        idx = subset_idx[i] if i_fin is None else subset_idx[i][i_fin]
+        return subset_arrays[i][idx]
 
-    if any(fm is not None for fm in frame_meta):
+    if any(fm is not None for fm in column_names):
         blocks = []
-        for i, fm in enumerate(frame_meta):
-            cols = fm[0] if fm is not None else range(arrays[i].shape[1])
+        for i, fm in enumerate(column_names):
+            cols = fm[0] if fm is not None else range(subset_arrays[i].shape[1])
             blocks.append(pd.DataFrame(_rows(i), columns=cols))
-        combined = pd.concat(blocks, axis=1, keys=keys)       # MultiIndex: (label, column)
+        combined = pd.concat(blocks, axis=1, keys=subset_keys)  # MultiIndex: (label, column)
         return combined
-    return concatenate([_rows(i) for i in range(len(arrays))], axis=1)
+    return concatenate([_rows(i) for i in range(len(subset_arrays))], axis=1)
 
 
 def spacefill_permute_design(n_pnts, subsets, subset_ln_pdfs=None,
@@ -484,26 +486,26 @@ def spacefill_permute_design(n_pnts, subsets, subset_ln_pdfs=None,
     """
     rng = default_rng() if rng is None else rng
     sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
-    arrays, keys, frame_meta, is_dict = _normalize_subsets(subsets)
-    k, D = len(arrays), n_pnts
-    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, keys, is_dict)
+    subset_arrays, subset_keys, column_names, is_dict = _restructure_subsets(subsets)
+    k, D = len(subset_arrays), n_pnts
+    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict)
 
-    sub_idx = []
-    for i, sub in enumerate(arrays):
-        m_i = sub.shape[0]
+    subset_idx = []
+    for i, subset in enumerate(subset_arrays):
+        m_i = subset.shape[0]
         if m_i >= D:
-            idx = array(spacefill_method(D, sub, ln_pdfs=ln_pdfs[i], return_by_index=True,
+            idx = array(spacefill_method(D, subset, ln_pdfs=ln_pdfs[i], return_by_index=True,
                                          rng=rng, **sf_kwargs), dtype='int64')
-            rng.shuffle(idx)                             # unorder, so the permute isn't aligned
+            rng.shuffle(idx)  # unorder, so the permute isn't aligned
         else:
-            warn(f"subset {keys[i]!r} has only {m_i} samples for a design of {D} points: forcing "
-                 f"at least {1 - m_i / D:.1%} duplication.  Provide ≳{D} samples to avoid this.")
-            idx = _tile_indices(m_i, D, rng)             # under-supplied: tile up (reshuffled)
-        sub_idx.append(idx)
+            warn(f"subset {subset_keys[i]!r} has only {m_i} samples for a design of {D} points: "
+                 f"forcing at least {1 - m_i / D:.1%} duplication.")
+            idx = _tile_indices(m_i, D, rng)  # under-supplied: tile up (reshuffled)
+        subset_idx.append(idx)
 
     if return_by_index:
-        return dict(zip(keys, sub_idx)) if is_dict else sub_idx
-    return _assemble_output(arrays, keys, frame_meta, is_dict, sub_idx)
+        return dict(zip(subset_keys, subset_idx)) if is_dict else subset_idx
+    return _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx)
 
 
 def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
@@ -536,25 +538,25 @@ def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
     """
     rng = default_rng() if rng is None else rng
     sf_kwargs = {} if spacefill_kwargs is None else dict(spacefill_kwargs)
-    arrays, keys, frame_meta, is_dict = _normalize_subsets(subsets)
-    k, D = len(arrays), n_pnts
-    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, keys, is_dict)
-    m = [s.shape[0] for s in arrays]
+    subset_arrays, subset_keys, column_names, is_dict = _restructure_subsets(subsets)
+    k, D = len(subset_arrays), n_pnts
+    ln_pdfs = _align_ln_pdfs(subset_ln_pdfs, subset_keys, is_dict)
+    m = [s.shape[0] for s in subset_arrays]
 
     for i, m_i in enumerate(m):
         if m_i < D:
-            warn(f"subset {keys[i]!r} has only {m_i} samples for a design of {D} points: its "
+            warn(f"subset {subset_keys[i]!r} has only {m_i} samples for a design of {D} points: "
                  f"marginal distinctness is capped at {m_i}, forcing at least {1 - m_i / D:.1%} "
-                 f"duplication (regardless of `f_tol`={f_tol}).  Provide ≳{D} samples to avoid.")
+                 f"duplication (regardless of `f_tol`={f_tol}).")
 
-    def _est_f(R, α, γ=0.898):
+    def _estimate_f(R, α, γ=0.898):
         """Estimated per-submodel duplication: occupancy model x empirical maximin over-selection
         factor c(R) = 1 + γ(1 - 1/R)  (c -> 1 as R -> 1); see `docs/spacefill.md`."""
         if R <= 1:
             return 0.0
         base = 1 - 1 / (α * R)
-        if base <= 0:          # α*R <= 1: fewer distinct candidates than selections -> saturated
-            return 1 - α       # (occupancy limit: at most α*D distinct of D -> f = 1 - α)
+        if base <= 0:     # α*R <= 1: fewer distinct candidates than selections -> saturated
+            return 1 - α  #           (occupancy limit: at most α*D distinct of D -> f = 1 - α)
         return (1 + γ * (1 - 1 / R)) * (1 - α * (1 - base ** R))
 
     # Pick replication R for the binding submodel so estimated duplication ≈ f_tol (f monotone in
@@ -565,40 +567,41 @@ def combine_spacefill_design(n_pnts, subsets, subset_ln_pdfs=None, f_tol=0.05,
         # Under-supplied binding subset: the forced-replication floor dominates; skip the budget
         # bisection (f_tol is unreachable — already warned) and just satisfy P >= D:
         R = 1.0 / α_max
-    elif f_tol <= 0.0 or _est_f(R_cap, α_max) <= f_tol:
+    elif f_tol <= 0.0 or _estimate_f(R_cap, α_max) <= f_tol:
         R = R_cap
     else:
         lo, hi = 1.0, R_cap
         for _ in range(60):
             mid = 0.5 * (lo + hi)
-            lo, hi = (mid, hi) if _est_f(mid, α_max) < f_tol else (lo, mid)
+            lo, hi = (mid, hi) if _estimate_f(mid, α_max) < f_tol else (lo, mid)
         R = 0.5 * (lo + hi)
     R = max(R, 1.0 / α_max)
     P = min(int(round(R * m_min)), max_proposals)
 
-    # Per submodel: random down-select to the shared pool (preserve candidate density), tile to P:
-    sub_idx, report = [], []
-    for i, sub in enumerate(arrays):
+    # Per subset: random down-select to the shared pool (preserve candidate density), tile to P:
+    subset_idx, report = [], []
+    for i, subset in enumerate(subset_arrays):
         m_i = m[i]
         m_star = min(P, m_i)
         keep = rng.choice(m_i, m_star, replace=False) if m_star < m_i else arange(m_i)
-        sub_idx.append(keep[_tile_indices(m_star, P, rng)])
-        report.append((m_star, P / m_star, m_star / D, _est_f(P / m_star, m_star / D)))
+        subset_idx.append(keep[_tile_indices(m_star, P, rng)])
+        report.append((m_star, P / m_star, m_star / D, _estimate_f(P / m_star, m_star / D)))
 
-    proposals = concatenate([arrays[i][sub_idx[i]] for i in range(k)], axis=1)
-    ln_pdf = (sum(ln_pdfs[i][sub_idx[i]] for i in range(k))
+    proposals = concatenate([subset_arrays[i][subset_idx[i]] for i in range(k)], axis=1)
+    ln_pdf = (sum(ln_pdfs[i][subset_idx[i]] for i in range(k))
               if all(lp is not None for lp in ln_pdfs) else None)
 
     if verbose:
         print(f"[combine_spacefill_design] method = {spacefill_method.__name__}")
         print(f"  D = {D}, m = {m}, m_min = {m_min}, α_max = {α_max:.3g}, f_tol = {f_tol}, P = {P}")
-        print(f"  {'sub':>8} {'m':>8} {'m*':>8} {'R':>7} {'α':>7} {'f_est':>9}")
+        print(f"  {'subset':>8} {'m':>8} {'m*':>8} {'R':>7} {'α':>7} {'f_est':>9}")
         for i, (m_star, R_i, α_i, f_i) in enumerate(report):
-            print(f"  {str(keys[i]):>8} {m[i]:>8} {m_star:>8} {R_i:>7.3g} {α_i:>7.3g} {f_i:>9.3%}")
+            print(f"  {str(subset_keys[i]):>8} {m[i]:>8} {m_star:>8} {R_i:>7.3g} {α_i:>7.3g} "
+                  f"{f_i:>9.3%}")
 
-    i_final = array(spacefill_method(D, proposals, ln_pdfs=ln_pdf, return_by_index=True, rng=rng,
-                                     **sf_kwargs), dtype='int64')
+    i_fin = array(spacefill_method(D, proposals, ln_pdfs=ln_pdf, return_by_index=True, rng=rng,
+                                   **sf_kwargs), dtype='int64')
     if return_by_index:
-        sel = [sub_idx[i][i_final] for i in range(k)]
-        return dict(zip(keys, sel)) if is_dict else sel
-    return _assemble_output(arrays, keys, frame_meta, is_dict, sub_idx, i_final)
+        sel = [subset_idx[i][i_fin] for i in range(k)]
+        return dict(zip(subset_keys, sel)) if is_dict else sel
+    return _restructure_ouput(subset_arrays, subset_keys, column_names, is_dict, subset_idx, i_fin)
