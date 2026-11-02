@@ -41,6 +41,22 @@ Recommendations for each method are based on these factors.  They are also limit
 - When the number of design points is large relative to the number of active dimensions, greedy-maximin sub-selection subsampling appears to provides better qualitative behavior and is recommended as a starting point in that regime.
 
 
+### Algorithmic notes: greedy maximin and blue-noise sampling
+
+A connection worth drawing out explicitly, because it is too often overlooked:  the greedy-maximin sub-sampling used here was developed independently in two communities, under different names and different motivations, and they arrive at essentially the same construction.
+
+- **Statistics / design of experiments** calls the additive form *greedy-maximin sampling*:  start from a seed and repeatedly add the candidate point that is farthest from all points already selected, maximizing the minimum inter-point distance as the design grows.
+- **Computer graphics** calls the (often subtractive) form *Poisson-disk sampling* or blue-noise sampling*:  distribute points so that no two are closer than some minimum radius, producing a spectrum with suppressed low-frequency content — the "blue" in blue noise — which the eye (and many numerical integrators) find desirable because it avoids both clumping and regular-grid aliasing.
+
+The design-of-experiments interest is that such a set space-fills a region evenly; the graphics interest is that it looks and integrates well.  These are two views of the same geometric object.  Recognizing the equivalence is practically useful, because the graphics community has invested heavily in *fast* algorithms, and that work transfers directly.
+
+The naive additive algorithm — at each of `n_pnts` steps, recompute every candidate's distance to every selected point — costs `O(n_pnts² · n_proposals · n_dims)`.  The key improvement is to maintain, for each candidate, only its distance to the *nearest* selected point, updating that single value against each newly added point; this drops the cost to `O(n_pnts · n_proposals · n_dims)`.  This is the structure Mitchell (1991) introduced (as "best-candidate" sampling), and it is the approach taken here — a running nearest-selected-distance array that is updated incrementally as each point is chosen, which is fast enough in practice for the proposal sizes and dimensionalities of interest.
+
+Bridson (2007) went further, achieving `O(n_pnts · n_dims)` by using a background grid to restrict the neighbor search to a local neighborhood rather than the full proposal set.  That elegant result is, however, effective mainly in low dimensions:  the number of grid cells to check grows exponentially with dimension (the curse of dimensionality strikes the grid), and the approach assumes generation over a continuous domain rather than sub-selection from a fixed proposal set. For the moderate-to-high-dimensional sub-sampling problems this toolkit targets, Mitchell's `O(n_pnts · n_proposals · n_dims)` form is the pragmatic choice and is retained here.
+
+*(The density-weighted and tempered variant used when probability information is available follows the same incremental-update structure, with inter-point distances rescaled by a per-point length-scale derived from the local density.)*
+
+
 ## Combining independent sample sets
 
 A situation that arises in practice is when the parameter vector splits into independent blocks — sub-models whose parameters were each sampled separately — so that one is handed several distinct sample sets (of possibly different sizes) rather than a single joint sampling.  Because the blocks are independent, any pairing of one block's sample with another's is a legitimate joint sample; the task is to assemble a single space-filling design of the desired size from these independent pieces.  Two routines address this: `spacefill_permute_design` and `combine_spacefill_design`.  They accept the sample sets as either a list or a dict, with items that are either ndarrays or pandas DataFrames (keyed/labeled output follows naturally from a dict input or DataFrame items).
